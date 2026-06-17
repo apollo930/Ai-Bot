@@ -42,19 +42,24 @@ def run_discord_bot():
 						ch = client.get_channel(ch_id)
 						if ch and ch.permissions_for(ch.guild.me).send_messages:
 							game_log_channel = ch
-							print(f"Game log channel set to #{ch.name}")
+							print(f"Game log channel set to #{ch.name}", flush=True)
 						else:
-							print(f"Warning: config.json channel {ch_id} not found or not messageable")
+							print(f"Warning: config.json channel {ch_id} not found or not messageable", flush=True)
 					else:
-						print("No game_log_channel_id in config.json")
+						print("No game_log_channel_id in config.json", flush=True)
 			except FileNotFoundError:
-				print("No config.json found — use /setgamechannel to configure game tracking")
+				print("No config.json found — use /setgamechannel to configure game tracking", flush=True)
 			try:
-				synced = await tree.sync(guild=discord.Object(id=1053695451234316358))
-				print(f"Synced {len(synced)} command(s)")
+				if GUILD_ID:
+					g = discord.Object(id=int(GUILD_ID))
+					tree.copy_global_to(guild=g)
+					synced = await tree.sync(guild=g)
+				else:
+					synced = await tree.sync()
+				print(f"Synced {len(synced)} command(s)", flush=True)
 			except Exception as e:
-				print(f"Failed to sync commands: {e}")
-			print(f"{client.user} is ready!")
+				print(f"Slash command sync failed: {e}", flush=True)
+			print(f"{client.user} is ready!", flush=True)
 
 		@client.event
 		async def on_message(message):
@@ -76,6 +81,7 @@ def run_discord_bot():
 
 				
 		load_dotenv()
+		GUILD_ID = os.environ.get("GUILD_ID")
 		game_log_channel = None
 
 		@client.event
