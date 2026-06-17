@@ -49,7 +49,11 @@ def run_discord_bot():
 						print("No game_log_channel_id in config.json")
 			except FileNotFoundError:
 				print("No config.json found — use /setgamechannel to configure game tracking")
-			await tree.sync(guild=discord.Object(id=1053695451234316358))
+			try:
+				synced = await tree.sync(guild=discord.Object(id=1053695451234316358))
+				print(f"Synced {len(synced)} command(s)")
+			except Exception as e:
+				print(f"Failed to sync commands: {e}")
 			print(f"{client.user} is ready!")
 
 		@client.event
