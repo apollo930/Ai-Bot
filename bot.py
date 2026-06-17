@@ -1,4 +1,5 @@
 import discord, os, utils
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 async def send_message(message, user_message, is_private):
@@ -16,9 +17,16 @@ def run_discord_bot():
 		intents.message_content = True
 		client = discord.Client(intents=intents)
 
+		@tasks.loop(seconds=60)
+		async def update_presence():
+			cpu_temp = utils.get_cpu_temp()
+			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings at {cpu_temp}"))
+
 		@client.event
 		async def on_ready():
-			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="your feelings"))
+			cpu_temp = utils.get_cpu_temp()
+			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings at {cpu_temp}"))
+			update_presence.start()
 			print(f"{client.user} is ready!")
 
 		@client.event

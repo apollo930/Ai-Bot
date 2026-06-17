@@ -2,6 +2,11 @@ import random, requests, json, os, re, urllib.parse
 from dotenv import load_dotenv
 load_dotenv()
 
+def get_cpu_temp() -> str:
+    with open("/sys/class/thermal/thermal_zone0/temp") as f:
+        temp = int(f.read().strip()) / 1000
+    return f"{temp:.1f}°C"
+
 def get_quote():
 	response = requests.get("https://zenquotes.io/api/random")
 	json_data = json.loads(response.text)
