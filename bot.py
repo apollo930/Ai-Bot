@@ -61,15 +61,15 @@ def run_discord_bot():
 			user_message = str(message.content) if message.content else "<no message>"
 			channel = str(message.channel)
 
-			print(f"{username} said: '{user_message}' in {channel}")
-
 			transformed = utils.transform_instagram_links(user_message)
 			if transformed:
 				await message.reply(transformed)
 
 			if user_message[0] == '.':
+				print(f"{username} said: '{user_message}' in {channel}")
 				user_message = user_message[1:]
 				await send_message(message, user_message, False)
+
 				
 		load_dotenv()
 		game_log_channel = None
