@@ -1,4 +1,4 @@
-import random, requests, json, os
+import random, requests, json, os, re, urllib.parse
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -24,6 +24,23 @@ def get_anagram(text_list):
 				ans.append(anagrams['anagram'])
 
 	return "Anagrams: " + ", ".join(ans)
+
+def transform_instagram_links(text: str) -> str | None:
+    TRACKING_PARAMS = {"igshid", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
+    pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/\S+'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    url = match.group()
+    parsed = urllib.parse.urlparse(url)
+    clean_query = "&".join(
+        f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
+    )
+    clean = parsed._replace(
+        netloc=parsed.netloc.replace("instagram.com", "kkinstagram.com"),
+        query=clean_query
+    )
+    return urllib.parse.urlunparse(clean)
 
 def get_response(message:str) -> str:
 	p_message = message.lower()

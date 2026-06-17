@@ -32,6 +32,10 @@ def run_discord_bot():
 
 			print(f"{username} said: '{user_message}' in {channel}")
 
+			transformed = utils.transform_instagram_links(user_message)
+			if transformed:
+				await message.reply(transformed)
+
 			if user_message[0] == '.':
 				user_message = user_message[1:]
 				await send_message(message, user_message, False)
