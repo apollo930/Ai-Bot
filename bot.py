@@ -52,6 +52,8 @@ def run_discord_bot():
 			try:
 				if GUILD_ID:
 					g = discord.Object(id=int(GUILD_ID))
+					tree.clear_commands(guild=g)
+					await tree.sync(guild=g)
 					tree.copy_global_to(guild=g)
 					synced = await tree.sync(guild=g)
 				else:
