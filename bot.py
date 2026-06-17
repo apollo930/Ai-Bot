@@ -15,17 +15,19 @@ def run_discord_bot():
 
 		intents = discord.Intents.default()
 		intents.message_content = True
+		intents.presences = True
+		intents.members = True
 		client = discord.Client(intents=intents)
 
 		@tasks.loop(seconds=60)
 		async def update_presence():
 			cpu_temp = utils.get_cpu_temp()
-			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings at {cpu_temp}"))
+			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 
 		@client.event
 		async def on_ready():
 			cpu_temp = utils.get_cpu_temp()
-			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings at {cpu_temp}"))
+			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 			update_presence.start()
 			print(f"{client.user} is ready!")
 
@@ -49,4 +51,18 @@ def run_discord_bot():
 				await send_message(message, user_message, False)
 				
 		load_dotenv()
+		GAME_LOG_CHANNEL_ID = int(os.environ.get("GAME_LOG_CHANNEL_ID", 0))
+
+		@client.event
+		async def on_presence_update(before, after):
+			if before.activities == after.activities:
+				return
+			before_games = {a.name for a in before.activities if isinstance(a, discord.Game)}
+			after_games = {a.name for a in after.activities if isinstance(a, discord.Game)}
+			new_games = after_games - before_games
+			for game in new_games:
+				channel = client.get_channel(GAME_LOG_CHANNEL_ID)
+				if channel:
+					await channel.send(f"Yooo {after.mention} started playing **{game}**!")
+
 		client.run(os.environ['BOT_TOKEN'])
