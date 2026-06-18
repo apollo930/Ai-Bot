@@ -14,7 +14,7 @@ def get_quote():
 	return quote
 
 def transform_instagram_links(text: str) -> str | None:
-    TRACKING_PARAMS = {"igshid", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
+    TRACKING_PARAMS = {"igshid", "igsh", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
     pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/[a-zA-Z0-9_/?=&%-]+'
     match = re.search(pattern, text)
     if not match:
