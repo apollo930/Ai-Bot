@@ -15,11 +15,11 @@ def get_quote():
 
 def transform_instagram_links(text: str) -> str | None:
     TRACKING_PARAMS = {"igshid", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
-    pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/\S+'
+    pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/[a-zA-Z0-9_/?=&%-]+'
     match = re.search(pattern, text)
     if not match:
         return None
-    url = match.group()
+    url = match.group().rstrip("|!.,)>")
     parsed = urllib.parse.urlparse(url)
     clean_query = "&".join(
         f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
