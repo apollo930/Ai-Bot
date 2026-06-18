@@ -72,8 +72,11 @@ def run_discord_bot():
 			user_message = str(message.content) if message.content else "<no message>"
 			channel = str(message.channel)
 
-			transformed = utils.transform_instagram_links(user_message)
-			if transformed:
+			result = utils.transform_instagram_links(user_message)
+			if result:
+				transformed, is_spoiler = result
+				if is_spoiler:
+					transformed = f"||{transformed}||"
 				try:
 					await message.delete()
 					webhooks = await message.channel.webhooks()

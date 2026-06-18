@@ -13,13 +13,14 @@ def get_quote():
 	quote = "`" + json_data[0]['q'] + "`" + " -" + json_data[0]['a']
 	return quote
 
-def transform_instagram_links(text: str) -> str | None:
+def transform_instagram_links(text: str) -> tuple[str, bool] | None:
     TRACKING_PARAMS = {"igshid", "igsh", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
     pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/[a-zA-Z0-9_/?=&%-]+'
     match = re.search(pattern, text)
     if not match:
         return None
     url = match.group().rstrip("|!.,)>")
+    is_spoiler = match.start() >= 2 and text[match.start() - 2 : match.start()] == "||" and text[match.end() : match.end() + 2] == "||"
     parsed = urllib.parse.urlparse(url)
     clean_query = "&".join(
         f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
@@ -28,7 +29,7 @@ def transform_instagram_links(text: str) -> str | None:
         netloc=parsed.netloc.replace("instagram.com", "kkinstagram.com"),
         query=clean_query
     )
-    return urllib.parse.urlunparse(clean)
+    return (urllib.parse.urlunparse(clean), is_spoiler)
 
 def get_response(message:str) -> str:
 	p_message = message.lower()
