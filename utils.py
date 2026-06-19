@@ -19,7 +19,7 @@ def transform_instagram_links(text: str) -> str | None:
     match = re.search(pattern, text)
     if not match:
         return None
-    url = match.group().rstrip("|!.,)>")
+    url = match.group()
     parsed = urllib.parse.urlparse(url)
     clean_query = "&".join(
         f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
@@ -28,7 +28,8 @@ def transform_instagram_links(text: str) -> str | None:
         netloc=parsed.netloc.replace("instagram.com", "kkinstagram.com"),
         query=clean_query
     )
-    return urllib.parse.urlunparse(clean)
+    cleaned_url = urllib.parse.urlunparse(clean)
+    return text[:match.start()] + cleaned_url + text[match.end():]
 
 def get_response(message:str) -> str:
 	p_message = message.lower()
