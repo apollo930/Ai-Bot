@@ -19,7 +19,7 @@ def transform_urls(text: str, rules: list[dict]) -> str | None:
     for rule in rules:
         domain = rule["domain"]
         replacement = rule["replacement"]
-        pattern = rf'https?://(?:[a-z0-9-]+\.)*{re.escape(domain)}/[a-zA-Z0-9_/?=&%-]+'
+        pattern = rf'https?://(?:[a-z0-9-]+\.)*{re.escape(domain)}/[a-zA-Z0-9_/?=&%~@.\-]+'
         match = re.search(pattern, text)
         if match:
             url = match.group()
