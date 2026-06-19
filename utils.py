@@ -13,23 +13,27 @@ def get_quote():
 	quote = "`" + json_data[0]['q'] + "`" + " -" + json_data[0]['a']
 	return quote
 
-def transform_instagram_links(text: str) -> str | None:
-    TRACKING_PARAMS = {"igshid", "igsh", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
-    pattern = r'https?://(?:www\.|m\.|l\.|)?instagram\.com/[a-zA-Z0-9_/?=&%-]+'
-    match = re.search(pattern, text)
-    if not match:
-        return None
-    url = match.group()
-    parsed = urllib.parse.urlparse(url)
-    clean_query = "&".join(
-        f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
-    )
-    clean = parsed._replace(
-        netloc=parsed.netloc.replace("instagram.com", "kkinstagram.com"),
-        query=clean_query
-    )
-    cleaned_url = urllib.parse.urlunparse(clean)
-    return text[:match.start()] + cleaned_url + text[match.end():]
+TRACKING_PARAMS = {"igshid", "igsh", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
+
+def transform_urls(text: str, rules: list[dict]) -> str | None:
+    for rule in rules:
+        domain = rule["domain"]
+        replacement = rule["replacement"]
+        pattern = rf'https?://(?:[a-z0-9-]+\.)*{re.escape(domain)}/[a-zA-Z0-9_/?=&%-]+'
+        match = re.search(pattern, text)
+        if match:
+            url = match.group()
+            parsed = urllib.parse.urlparse(url)
+            clean_query = "&".join(
+                f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
+            )
+            clean = parsed._replace(
+                netloc=parsed.netloc.replace(domain, replacement),
+                query=clean_query
+            )
+            cleaned_url = urllib.parse.urlunparse(clean)
+            return text[:match.start()] + cleaned_url + text[match.end():]
+    return None
 
 def get_response(message:str) -> str:
 	p_message = message.lower()

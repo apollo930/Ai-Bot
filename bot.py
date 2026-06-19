@@ -27,7 +27,7 @@ def run_discord_bot():
 
 		@client.event
 		async def on_ready():
-			nonlocal game_log_channel
+			nonlocal game_log_channel, url_rules
 			cpu_temp = utils.get_cpu_temp()
 			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 			update_presence.start()
@@ -47,6 +47,8 @@ def run_discord_bot():
 							print(f"Warning: config.json channel {ch_id} not found or not messageable", flush=True)
 					else:
 						print("No game_log_channel_id in config.json", flush=True)
+					url_rules.clear()
+					url_rules.extend(data.get("url_rules", []))
 			except FileNotFoundError:
 				print("No config.json found — use /setgamechannel to configure game tracking", flush=True)
 			try:
@@ -72,7 +74,7 @@ def run_discord_bot():
 			user_message = str(message.content) if message.content else "<no message>"
 			channel = str(message.channel)
 
-			transformed = utils.transform_instagram_links(user_message)
+			transformed = utils.transform_urls(user_message, url_rules)
 			if transformed:
 				try:
 					await message.delete()
@@ -93,6 +95,7 @@ def run_discord_bot():
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")
 		game_log_channel = None
+		url_rules = []
 
 		@client.event
 		async def on_presence_update(before, after):
@@ -114,9 +117,68 @@ def run_discord_bot():
 			if not channel.permissions_for(interaction.guild.me).send_messages:
 				await interaction.response.send_message("I can't send messages there!", ephemeral=True)
 				return
+			data = {"game_log_channel_id": channel.id}
+			try:
+				with open("config.json") as f:
+					data["url_rules"] = json.load(f).get("url_rules", [])
+			except (FileNotFoundError, json.JSONDecodeError):
+				pass
 			with open("config.json", "w") as f:
-				json.dump({"game_log_channel_id": channel.id}, f)
+				json.dump(data, f)
 			game_log_channel = channel
 			await interaction.response.send_message(f"Game logs will go to {channel.mention}", ephemeral=True)
+
+		urlrule = discord.app_commands.Group(name="urlrule", description="Manage URL replacement rules")
+
+		@urlrule.command(name="add", description="Add a URL replacement rule")
+		@discord.app_commands.default_permissions(manage_guild=True)
+		async def urlrule_add(interaction: discord.Interaction, domain: str, replacement: str):
+			nonlocal url_rules
+			for rule in url_rules:
+				if rule["domain"] == domain:
+					await interaction.response.send_message(f"Rule for `{domain}` already exists", ephemeral=True)
+					return
+			url_rules.append({"domain": domain, "replacement": replacement})
+			data = {}
+			try:
+				with open("config.json") as f:
+					data = json.load(f)
+			except (FileNotFoundError, json.JSONDecodeError):
+				pass
+			data["url_rules"] = url_rules.copy()
+			with open("config.json", "w") as f:
+				json.dump(data, f)
+			await interaction.response.send_message(f"✅ Rule added: `{domain}` → `{replacement}`", ephemeral=True)
+
+		@urlrule.command(name="remove", description="Remove a URL replacement rule")
+		@discord.app_commands.default_permissions(manage_guild=True)
+		async def urlrule_remove(interaction: discord.Interaction, domain: str):
+			nonlocal url_rules
+			for i, rule in enumerate(url_rules):
+				if rule["domain"] == domain:
+					url_rules.pop(i)
+					data = {}
+					try:
+						with open("config.json") as f:
+							data = json.load(f)
+					except (FileNotFoundError, json.JSONDecodeError):
+						pass
+					data["url_rules"] = url_rules.copy()
+					with open("config.json", "w") as f:
+						json.dump(data, f)
+					await interaction.response.send_message(f"✅ Rule removed: `{domain}`", ephemeral=True)
+					return
+			await interaction.response.send_message(f"No rule found for `{domain}`", ephemeral=True)
+
+		@urlrule.command(name="list", description="List all URL replacement rules")
+		async def urlrule_list(interaction: discord.Interaction):
+			nonlocal url_rules
+			if not url_rules:
+				await interaction.response.send_message("No rules configured.", ephemeral=True)
+				return
+			lines = [f"{i+1}. `{r['domain']}` → `{r['replacement']}`" for i, r in enumerate(url_rules)]
+			await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+		tree.add_command(urlrule)
 
 		client.run(os.environ['BOT_TOKEN'])
