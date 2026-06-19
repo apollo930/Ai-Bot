@@ -13,7 +13,7 @@ def get_quote():
 	quote = "`" + json_data[0]['q'] + "`" + " -" + json_data[0]['a']
 	return quote
 
-TRACKING_PARAMS = {"igshid", "igsh", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
+TRACKING_PARAMS = {"igshid", "igsh", "xmt", "slof", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"}
 
 def transform_urls(text: str, rules: list[dict]) -> str | None:
     for rule in rules:
