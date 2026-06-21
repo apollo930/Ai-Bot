@@ -191,7 +191,7 @@ def run_discord_bot():
 
 		tree.add_command(urlrule)
 
-		@tree.command(name="addreact", description="Save a reaction link")
+		@tree.command(name="addai", description="Save a reaction link")
 		@discord.app_commands.default_permissions(manage_guild=True)
 		async def add_react(interaction: discord.Interaction, name: str, link: str):
 			nonlocal reactions
@@ -216,7 +216,7 @@ def run_discord_bot():
 				for name in reactions if current.lower() in name.lower()
 			][:25]
 
-		@tree.command(name="react", description="Send a saved reaction")
+		@tree.command(name="ai", description="Send a saved reaction")
 		@discord.app_commands.autocomplete(name=_autocomplete_reactions)
 		async def react(interaction: discord.Interaction, name: str):
 			nonlocal reactions
