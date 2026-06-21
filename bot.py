@@ -133,6 +133,12 @@ def run_discord_bot():
 
 		urlrule = discord.app_commands.Group(name="urlrule", description="Manage URL replacement rules")
 
+		async def autocomplete_domains(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+			return [
+				discord.app_commands.Choice(name=r["domain"], value=r["domain"])
+				for r in url_rules if current.lower() in r["domain"].lower()
+			][:25]
+
 		@urlrule.command(name="add", description="Add a URL replacement rule")
 		@discord.app_commands.default_permissions(manage_guild=True)
 		async def urlrule_add(interaction: discord.Interaction, domain: str, replacement: str):
@@ -154,6 +160,7 @@ def run_discord_bot():
 			await interaction.response.send_message(f"✅ Rule added: `{domain}` → `{replacement}`", ephemeral=True)
 
 		@urlrule.command(name="remove", description="Remove a URL replacement rule")
+		@discord.app_commands.autocomplete(domain=autocomplete_domains)
 		@discord.app_commands.default_permissions(manage_guild=True)
 		async def urlrule_remove(interaction: discord.Interaction, domain: str):
 			nonlocal url_rules
@@ -203,7 +210,14 @@ def run_discord_bot():
 				json.dump(data, f)
 			await interaction.response.send_message(f"✅ Reaction `{name}` added!", ephemeral=True)
 
+		async def _autocomplete_reactions(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+			return [
+				discord.app_commands.Choice(name=name, value=name)
+				for name in reactions if current.lower() in name.lower()
+			][:25]
+
 		@tree.command(name="react", description="Send a saved reaction")
+		@discord.app_commands.autocomplete(name=_autocomplete_reactions)
 		async def react(interaction: discord.Interaction, name: str):
 			nonlocal reactions
 			if name not in reactions:
