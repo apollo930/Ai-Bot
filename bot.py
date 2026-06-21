@@ -184,8 +184,6 @@ def run_discord_bot():
 
 		tree.add_command(urlrule)
 
-		client.run(os.environ['BOT_TOKEN'])
-
 		@tree.command(name="addreact", description="Save a reaction link")
 		@discord.app_commands.default_permissions(manage_guild=True)
 		async def add_react(interaction: discord.Interaction, name: str, link: str):
@@ -221,3 +219,5 @@ def run_discord_bot():
 				username=interaction.user.display_name,
 				avatar_url=interaction.user.display_avatar.url,
 			)
+
+		client.run(os.environ['BOT_TOKEN'])
