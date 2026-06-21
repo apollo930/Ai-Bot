@@ -27,7 +27,7 @@ def run_discord_bot():
 
 		@client.event
 		async def on_ready():
-			nonlocal game_log_channel, url_rules
+			nonlocal game_log_channel, url_rules, reactions
 			cpu_temp = utils.get_cpu_temp()
 			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 			update_presence.start()
@@ -49,6 +49,8 @@ def run_discord_bot():
 						print("No game_log_channel_id in config.json", flush=True)
 					url_rules.clear()
 					url_rules.extend(data.get("url_rules", []))
+					reactions.clear()
+					reactions.update(data.get("reactions", {}))
 			except FileNotFoundError:
 				print("No config.json found — use /setgamechannel to configure game tracking", flush=True)
 			try:
@@ -96,6 +98,7 @@ def run_discord_bot():
 		GUILD_ID = os.environ.get("GUILD_ID")
 		game_log_channel = None
 		url_rules = []
+		reactions = {}
 
 		@client.event
 		async def on_presence_update(before, after):
@@ -177,8 +180,44 @@ def run_discord_bot():
 				await interaction.response.send_message("No rules configured.", ephemeral=True)
 				return
 			lines = [f"{i+1}. `{r['domain']}` → `{r['replacement']}`" for i, r in enumerate(url_rules)]
-			await interaction.response.send_message("\n".join(lines), ephemeral=True)
+			await interaction.response.send_message("\n".join(lines), ephemeral=True			)
 
 		tree.add_command(urlrule)
 
 		client.run(os.environ['BOT_TOKEN'])
+
+		@tree.command(name="addreact", description="Save a reaction link")
+		@discord.app_commands.default_permissions(manage_guild=True)
+		async def add_react(interaction: discord.Interaction, name: str, link: str):
+			nonlocal reactions
+			if not link.startswith(("http://", "https://")):
+				await interaction.response.send_message("Link must start with http:// or https://", ephemeral=True)
+				return
+			reactions[name] = link
+			data = {}
+			try:
+				with open("config.json") as f:
+					data = json.load(f)
+			except (FileNotFoundError, json.JSONDecodeError):
+				pass
+			data["reactions"] = dict(reactions)
+			with open("config.json", "w") as f:
+				json.dump(data, f)
+			await interaction.response.send_message(f"✅ Reaction `{name}` added!", ephemeral=True)
+
+		@tree.command(name="react", description="Send a saved reaction")
+		async def react(interaction: discord.Interaction, name: str):
+			nonlocal reactions
+			if name not in reactions:
+				await interaction.response.send_message(f"No reaction named `{name}`", ephemeral=True)
+				return
+			await interaction.response.send_message("✅", ephemeral=True)
+			webhooks = await interaction.channel.webhooks()
+			webhook = discord.utils.get(webhooks, name="IG Cleaner")
+			if not webhook:
+				webhook = await interaction.channel.create_webhook(name="IG Cleaner")
+			await webhook.send(
+				reactions[name],
+				username=interaction.user.display_name,
+				avatar_url=interaction.user.display_avatar.url,
+			)
