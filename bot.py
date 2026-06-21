@@ -218,18 +218,21 @@ def run_discord_bot():
 
 		@tree.command(name="ai", description="Send a saved reaction")
 		@discord.app_commands.autocomplete(name=_autocomplete_reactions)
-		async def react(interaction: discord.Interaction, name: str):
+		async def react(interaction: discord.Interaction, name: str, target: discord.Member = None):
 			nonlocal reactions
 			if name not in reactions:
 				await interaction.response.send_message(f"No reaction named `{name}`", ephemeral=True)
 				return
+			link = reactions[name]
+			if target:
+				link = f"{target.mention} {link}"
 			await interaction.response.send_message("✅", ephemeral=True)
 			webhooks = await interaction.channel.webhooks()
 			webhook = discord.utils.get(webhooks, name="IG Cleaner")
 			if not webhook:
 				webhook = await interaction.channel.create_webhook(name="IG Cleaner")
 			await webhook.send(
-				reactions[name],
+				link,
 				username=interaction.user.display_name,
 				avatar_url=interaction.user.display_avatar.url,
 			)
