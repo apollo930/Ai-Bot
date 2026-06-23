@@ -89,9 +89,12 @@ def run_discord_bot():
 					pass
 
 			if user_message[0] == '.':
-				print(f"{username} said: '{user_message}' in {channel}")
-				user_message = user_message[1:]
-				await send_message(message, user_message, False)
+				rest = user_message[1:].strip()
+				cmd = rest.split()[0].lower() if rest else ""
+				if cmd in ("hello", "hey", "hi", "yo", "sup", "wassup", "hola", "inspire", "motivate") or "depressed" in rest.lower():
+					print(f"{username} said: '{user_message}' in {channel}")
+					user_message = user_message[1:]
+					await send_message(message, user_message, False)
 
 				
 		load_dotenv()
