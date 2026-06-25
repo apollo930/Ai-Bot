@@ -76,6 +76,9 @@ def run_discord_bot():
 			user_message = str(message.content) if message.content else "<no message>"
 			channel = str(message.channel)
 
+			if user_message.startswith('\\'):
+				return
+
 			transformed = utils.transform_urls(user_message, url_rules)
 			if transformed:
 				try:
