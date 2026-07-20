@@ -83,11 +83,15 @@ def run_discord_bot():
 			if transformed:
 				try:
 					await message.delete()
-					webhooks = await message.channel.webhooks()
+					ch = message.channel.parent if isinstance(message.channel, discord.Thread) else message.channel
+					webhooks = await ch.webhooks()
 					webhook = discord.utils.get(webhooks, name="IG Cleaner")
 					if not webhook:
-						webhook = await message.channel.create_webhook(name="IG Cleaner")
-					await webhook.send(transformed, username=message.author.display_name, avatar_url=message.author.display_avatar.url)
+						webhook = await ch.create_webhook(name="IG Cleaner")
+					kwargs = {"username": message.author.display_name, "avatar_url": message.author.display_avatar.url}
+					if isinstance(message.channel, discord.Thread):
+						kwargs["thread"] = message.channel
+					await webhook.send(transformed, **kwargs)
 				except:
 					pass
 
