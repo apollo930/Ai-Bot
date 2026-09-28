@@ -91,7 +91,13 @@ def run_discord_bot():
 					kwargs = {"username": message.author.display_name, "avatar_url": message.author.display_avatar.url}
 					if isinstance(message.channel, discord.Thread):
 						kwargs["thread"] = message.channel
-					await webhook.send(transformed, **kwargs)
+					view = discord.ui.View(timeout=None)
+					view.add_item(discord.ui.Button(
+						label="Delete", emoji="🗑️",
+						style=discord.ButtonStyle.secondary,
+						custom_id=f"dellink:{message.author.id}",
+					))
+					await webhook.send(transformed, view=view, **kwargs)
 				except:
 					pass
 
@@ -103,7 +109,20 @@ def run_discord_bot():
 					user_message = user_message[1:]
 					await send_message(message, user_message, False)
 
-				
+		@client.event
+		async def on_interaction(interaction: discord.Interaction):
+			if not interaction.data or "custom_id" not in interaction.data:
+				return
+			cid = interaction.data["custom_id"]
+			if not cid.startswith("dellink:"):
+				return
+			author_id = int(cid.split(":", 1)[1])
+			if interaction.user.id != author_id and not interaction.user.guild_permissions.manage_messages:
+				await interaction.response.send_message("Not your link!", ephemeral=True)
+				return
+			await interaction.response.defer()
+			await interaction.message.delete()
+
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")
 		game_log_channel = None
