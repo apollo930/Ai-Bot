@@ -170,13 +170,16 @@ def run_discord_bot():
 
 		@urlrule.command(name="add", description="Add a URL replacement rule")
 		@discord.app_commands.default_permissions(manage_guild=True)
-		async def urlrule_add(interaction: discord.Interaction, domain: str, replacement: str):
+		async def urlrule_add(interaction: discord.Interaction, domain: str, replacement: str, drop: str = None):
 			nonlocal url_rules
 			for rule in url_rules:
 				if rule["domain"] == domain:
 					await interaction.response.send_message(f"Rule for `{domain}` already exists", ephemeral=True)
 					return
-			url_rules.append({"domain": domain, "replacement": replacement})
+			rule = {"domain": domain, "replacement": replacement}
+			if drop:
+				rule["drop"] = [p.strip() for p in drop.split(",") if p.strip()]
+			url_rules.append(rule)
 			data = {}
 			try:
 				with open("config.json") as f:
@@ -215,7 +218,10 @@ def run_discord_bot():
 			if not url_rules:
 				await interaction.response.send_message("No rules configured.", ephemeral=True)
 				return
-			lines = [f"{i+1}. `{r['domain']}` → `{r['replacement']}`" for i, r in enumerate(url_rules)]
+			lines = [
+				f"{i+1}. `{r['domain']}` → `{r['replacement']}`" + (f" (drop: {', '.join(r['drop'])})" if r.get("drop") else "")
+				for i, r in enumerate(url_rules)
+			]
 			await interaction.response.send_message("\n".join(lines), ephemeral=True			)
 
 		tree.add_command(urlrule)

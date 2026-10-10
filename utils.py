@@ -13,7 +13,7 @@ def get_quote():
 	quote = "`" + json_data[0]['q'] + "`" + " -" + json_data[0]['a']
 	return quote
 
-TRACKING_PARAMS = {"si", "igshid", "igsh", "xmt", "slof", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "stkn"}
+KEEP_PARAMS = {"v", "t", "list", "index", "start", "time_continue", "img_index", "story_item"}
 
 def transform_urls(text: str, rules: list[dict]) -> str | None:
     for rule in rules:
@@ -24,8 +24,9 @@ def transform_urls(text: str, rules: list[dict]) -> str | None:
         if match:
             url = match.group()
             parsed = urllib.parse.urlparse(url)
+            allowed = KEEP_PARAMS - set(rule.get("drop", []))
             clean_query = "&".join(
-                f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k not in TRACKING_PARAMS
+                f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k in allowed
             )
             clean = parsed._replace(
                 netloc=parsed.netloc.replace(domain, replacement),
