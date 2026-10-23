@@ -137,6 +137,10 @@ def open_button(url: str) -> tuple[str, str] | None:
     return None
 
 
+def host_of(url: str) -> str:
+    return urllib.parse.urlparse(url).hostname or url
+
+
 def short_link(url: str) -> str:
     """Compact label for a link in status notices: host plus a short path, not clickable."""
     parsed = urllib.parse.urlparse(url)

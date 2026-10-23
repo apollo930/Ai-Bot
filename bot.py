@@ -11,71 +11,9 @@ async def send_message(message, user_message, is_private):
 		print("Error: " + str(e))
 
 
-class FixProgress:
-	"""A small silent reply under the poster's message saying which fixer is being tried.
-	It only shows up if fixing takes a moment, is deleted once the repost is sent, and on
-	failure says what was tried, with a Dismiss button (it also removes itself after a while)."""
-
-	SHOW_AFTER = 1.5  # seconds: fast fixes never flash a notice
-	FAIL_LINGER = 30  # seconds the failure notice stays before deleting itself
-
-	def __init__(self, message, urls):
-		self.message = message
-		self.lines = {u: "starting…" for u in urls}
-		self.notice = None
-		self.done = False
-		self.last_edit = 0.0
-		self.task = asyncio.create_task(self._show_later())
-
-	def _text(self):
-		return "\n".join(f"-# ⏳ {utils.short_link(u)}: {s}" for u, s in self.lines.items())
-
-	async def _show_later(self):
-		await asyncio.sleep(self.SHOW_AFTER)
-		if self.done:
-			return
-		try:
-			self.notice = await self.message.reply(self._text(), silent=True, mention_author=False,
-				allowed_mentions=discord.AllowedMentions.none())
-			self.last_edit = time.time()
-		except discord.HTTPException:
-			pass
-
-	async def update(self, url, status):
-		self.lines[url] = status
-		# Discord rate-limits edits; one a second is plenty for a progress line
-		if self.notice and not self.done and time.time() - self.last_edit >= 1:
-			self.last_edit = time.time()
-			try:
-				await self.notice.edit(content=self._text())
-			except discord.HTTPException:
-				pass
-
-	async def finish(self):
-		"""The repost went out (or nothing needed saying): remove the notice."""
-		self.done = True
-		self.task.cancel()
-		if self.notice:
-			try:
-				await self.notice.delete()
-			except discord.HTTPException:
-				pass
-
-	async def fail(self, text):
-		"""Nothing could be fixed: say why, with a Dismiss button for the poster."""
-		self.done = True
-		self.task.cancel()
-		view = discord.ui.View(timeout=None)
-		view.add_item(discord.ui.Button(label="Dismiss", style=discord.ButtonStyle.secondary,
-			custom_id=f"dismiss:{self.message.author.id}"))
-		try:
-			if self.notice:
-				await self.notice.edit(content=text, view=view, delete_after=self.FAIL_LINGER)
-			else:
-				await self.message.reply(text, view=view, silent=True, mention_author=False,
-					allowed_mentions=discord.AllowedMentions.none(), delete_after=self.FAIL_LINGER)
-		except discord.HTTPException:
-			pass
+WORKING, FAILED = "⏳", "⚠️"  # reactions on the poster's message while fixing / when nothing could be fixed
+SHOW_WORKING_AFTER = 1.5  # seconds: fast fixes never flash a reaction
+DETAILS_KEPT = 300  # fixes whose details "Apps → Embed details" can still show
 
 
 def run_discord_bot():
@@ -134,42 +72,48 @@ def run_discord_bot():
 				print(f"Slash command sync failed: {e}", flush=True)
 			print(f"{client.user} is ready!", flush=True)
 
-		async def embeds(url: str) -> bool:
-			"""Would Discord get a media embed from this fixer URL?"""
+		async def embed_problem(url: str) -> str | None:
+			"""None if Discord would get a media embed from this fixer URL, else what went wrong."""
 			nonlocal http
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
 			try:
 				async with http.get(url, timeout=aiohttp.ClientTimeout(total=10), max_redirects=5) as resp:
 					if resp.status != 200:
-						return False
+						return f"HTTP {resp.status}"
 					# kkinstagram-style fixers redirect Discordbot straight to the media file
 					if resp.content_type.startswith(("image/", "video/")):
-						return True
+						return None
 					if "html" not in resp.content_type:
-						return False
+						return f"answered with {resp.content_type}"
 					body = await resp.content.read(256 * 1024)
-					return utils.has_embed_media(body.decode("utf-8", errors="replace"))
+					if utils.has_embed_media(body.decode("utf-8", errors="replace")):
+						return None
+					return "no image/video in its page (post not found or blocked)"
+			except TimeoutError:
+				return "timed out (10s)"
 			except Exception as e:
 				print(f"Probe failed for {url}: {e.__class__.__name__}", flush=True)
-				return False
+				return f"couldn't connect ({e.__class__.__name__})"
 
-		async def resolve(url: str, rule: dict, progress: FixProgress) -> str | None:
-			"""First fixer URL for url that embeds, trying the rule's hosts in order."""
+		async def resolve(url: str, rule: dict, steps: list) -> str | None:
+			"""First fixer URL for url that embeds, trying the rule's hosts in order.
+			Each attempt goes into steps, for "Apps → Embed details"."""
 			hit = fixed_cache.get(url)
 			if hit and time.time() - hit[0] < 600:
+				steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
 				return hit[1]
-			hosts = utils.rule_hosts(rule)
-			for i, host in enumerate(hosts):
+			for host in utils.rule_hosts(rule):
 				candidate = utils.fix_url(url, rule, host)
-				step = f"trying `{host}`" if i == 0 else f"`{hosts[i - 1]}` failed, trying `{host}` ({i + 1}/{len(hosts)})"
-				await progress.update(url, step)
-				if await embeds(candidate):
+				problem = await embed_problem(candidate)
+				if problem is None:
+					steps.append(f"✓ `{host}`: used")
 					if len(fixed_cache) > 500:
 						fixed_cache.clear()
 					fixed_cache[url] = (time.time(), candidate)
 					return candidate
-				print(f"Fixer {host} has no embed for {url}", flush=True)
+				steps.append(f"✗ `{host}`: {problem}")
+				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
 			return None
 
 		async def instagram_gallery(url: str, room: int, size_limit: int):
@@ -231,44 +175,65 @@ def run_discord_bot():
 			if sum(a.size for a in message.attachments) > limit:
 				return
 			unique = {url: rule for _s, _e, url, rule in links}
-			progress = FixProgress(message, unique)
+			steps = {u: [] for u in unique}
+			marker = asyncio.create_task(mark_working(message))
 			try:
-				if not await repost_fixed(message, user_message, links, unique, limit, progress):
-					tried = "; ".join(f"{utils.short_link(u)}: " + ", ".join(f"`{h}`" for h in utils.rule_hosts(r)) for u, r in unique.items())
-					await progress.fail(f"-# ⚠️ Couldn't fix the embed, so your message is left as is. Tried {tried}.")
-					return
-			except Exception:
-				await progress.finish()
-				raise
-			await progress.finish()
+				fixed_any, sent = await repost_fixed(message, user_message, links, unique, limit, steps)
+			finally:
+				marker.cancel()
+			remember_details(steps, message.id, sent.id if sent else None)
+			if not fixed_any:
+				await set_reaction(message, FAILED)  # left as is; Apps → Embed details says why
+			elif sent is None:
+				await set_reaction(message, None)  # nothing was reposted, so the original stays: clear ⏳
 
-		async def repost_fixed(message, user_message, links, unique, limit, progress) -> bool:
-			"""Repost with fixed links. False when no link could be fixed (nothing was posted)."""
-			results = await asyncio.gather(*(resolve(u, r, progress) for u, r in unique.items()))
+		async def mark_working(message):
+			"""⏳ on the poster's message, only if fixing takes a moment."""
+			await asyncio.sleep(SHOW_WORKING_AFTER)
+			try:
+				await message.add_reaction(WORKING)
+			except discord.HTTPException:
+				pass
+
+		async def set_reaction(message, emoji):
+			try:
+				await message.remove_reaction(WORKING, client.user)
+				if emoji:
+					await message.add_reaction(emoji)
+			except discord.HTTPException:
+				pass
+
+		def remember_details(steps, *message_ids):
+			for mid in message_ids:
+				if mid:
+					fix_details[mid] = steps
+			while len(fix_details) > DETAILS_KEPT:
+				fix_details.pop(next(iter(fix_details)))
+
+		async def repost_fixed(message, user_message, links, unique, limit, steps):
+			"""Repost with fixed links. Returns (fixed_any, the repost or None)."""
+			results = await asyncio.gather(*(resolve(u, r, steps[u]) for u, r in unique.items()))
 			chosen = {u: fixed for u, fixed in zip(unique, results) if fixed}
-			for u in unique:
-				if u in chosen:
-					await progress.update(u, "✓ fixed, posting…")
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
 			gallery, gallery_url = None, None
 			for url in unique:
-				if utils.instagram_shortcode(url):
-					await progress.update(url, "fetching the photos…")
 				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit)
 				if gallery:
 					gallery_url = url
+					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
 					# the photos are attached, so the link itself shouldn't embed a grid too
 					chosen[url] = f"<{utils.instagram_url(url)}>"
 					break
 			if not chosen:
-				return False  # no fixer works right now: leave the original alone
+				return False, None  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			ref = message.reference.resolved if message.reference else None
 			if isinstance(ref, discord.Message):
 				transformed = f"-# ↪ replying to [{ref.author.display_name}]({ref.jump_url})\n{transformed}"
 			if len(transformed) > 2000:
-				return True  # too long to repost; nothing to warn about
+				steps[next(iter(steps))].append("✗ the fixed message would be over 2000 characters, so it wasn't reposted")
+				return True, None
 			try:
 				ch = message.channel.parent if isinstance(message.channel, discord.Thread) else message.channel
 				webhooks = await ch.webhooks()
@@ -297,7 +262,8 @@ def run_discord_bot():
 				sent = await webhook.send(transformed, view=view, files=files, wait=True, **kwargs)
 			except discord.HTTPException as e:
 				print(f"Link repost failed in #{message.channel}: {e}", flush=True)
-				return True
+				steps[next(iter(steps))].append(f"✗ reposting failed: {e}")
+				return True, None
 			# Send first, delete second: if the delete fails, drop the repost instead of losing the message.
 			try:
 				await message.delete()
@@ -305,7 +271,8 @@ def run_discord_bot():
 				if not isinstance(e, discord.NotFound):
 					print(f"Couldn't delete original in #{message.channel}: {e}", flush=True)
 				await sent.delete()
-			return True
+				return True, None
+			return True, sent
 
 		@client.event
 		async def on_message(message):
@@ -335,7 +302,7 @@ def run_discord_bot():
 			if not interaction.data or "custom_id" not in interaction.data:
 				return
 			cid = interaction.data["custom_id"]
-			if not cid.startswith(("dellink:", "dismiss:")):
+			if not cid.startswith("dellink:"):
 				return
 			author_id = int(cid.split(":", 1)[1])
 			if interaction.user.id != author_id and not interaction.user.guild_permissions.manage_messages:
@@ -351,6 +318,7 @@ def run_discord_bot():
 		game_log_channel = None
 		url_rules = []
 		fixed_cache = {}
+		fix_details = {}  # message id (original and repost) -> per-link attempt lines
 		http = None
 		reactions = {}
 
@@ -385,6 +353,23 @@ def run_discord_bot():
 				json.dump(data, f)
 			game_log_channel = channel
 			await interaction.response.send_message(f"Game logs will go to {channel.mention}", ephemeral=True)
+
+		@tree.context_menu(name="Embed details")
+		async def embed_details(interaction: discord.Interaction, message: discord.Message):
+			"""Right-click a message → Apps → Embed details: what the link fixer did, only for you."""
+			steps = fix_details.get(message.id)
+			if not steps:
+				await interaction.response.send_message(
+					"No link fixing happened on this message, or it was too long ago "
+					f"(details are kept for the last {DETAILS_KEPT} fixes since the bot started).",
+					ephemeral=True,
+				)
+				return
+			lines = ["**Embed fixing**"]
+			for url, url_steps in steps.items():
+				lines.append(utils.short_link(url))
+				lines += [f"- {step}" for step in url_steps] or ["- nothing tried"]
+			await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
 
 		urlrule = discord.app_commands.Group(name="urlrule", description="Manage URL replacement rules")
 
