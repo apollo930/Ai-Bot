@@ -1,4 +1,4 @@
-import discord, os, utils, json
+import discord, os, utils, json, asyncio, time, aiohttp
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -67,6 +67,86 @@ def run_discord_bot():
 				print(f"Slash command sync failed: {e}", flush=True)
 			print(f"{client.user} is ready!", flush=True)
 
+		async def embeds(url: str) -> bool:
+			"""Would Discord get a media embed from this fixer URL?"""
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(url, timeout=aiohttp.ClientTimeout(total=6), max_redirects=5) as resp:
+					if resp.status != 200:
+						return False
+					# kkinstagram-style fixers redirect Discordbot straight to the media file
+					if resp.content_type.startswith(("image/", "video/")):
+						return True
+					if "html" not in resp.content_type:
+						return False
+					body = await resp.content.read(256 * 1024)
+					return utils.has_embed_media(body.decode("utf-8", errors="replace"))
+			except Exception as e:
+				print(f"Probe failed for {url}: {e.__class__.__name__}", flush=True)
+				return False
+
+		async def resolve(url: str, rule: dict) -> str | None:
+			"""First fixer URL for url that embeds, trying the rule's hosts in order."""
+			hit = fixed_cache.get(url)
+			if hit and time.time() - hit[0] < 600:
+				return hit[1]
+			for host in utils.rule_hosts(rule):
+				candidate = utils.fix_url(url, rule, host)
+				if await embeds(candidate):
+					if len(fixed_cache) > 500:
+						fixed_cache.clear()
+					fixed_cache[url] = (time.time(), candidate)
+					return candidate
+				print(f"Fixer {host} has no embed for {url}", flush=True)
+			return None
+
+		async def fix_links(message, user_message):
+			links = utils.find_links(user_message, url_rules)[:5]
+			if not links or message.flags.suppress_embeds:
+				return
+			if sum(a.size for a in message.attachments) > message.guild.filesize_limit:
+				return
+			unique = {url: rule for _s, _e, url, rule in links}
+			results = await asyncio.gather(*(resolve(u, r) for u, r in unique.items()))
+			chosen = {u: fixed for u, fixed in zip(unique, results) if fixed}
+			if not chosen:
+				return  # no fixer works right now: leave the original alone
+			transformed = utils.rewrite_links(user_message, links, chosen)
+			ref = message.reference.resolved if message.reference else None
+			if isinstance(ref, discord.Message):
+				transformed = f"-# ↪ replying to [{ref.author.display_name}]({ref.jump_url})\n{transformed}"
+			if len(transformed) > 2000:
+				return
+			try:
+				ch = message.channel.parent if isinstance(message.channel, discord.Thread) else message.channel
+				webhooks = await ch.webhooks()
+				webhook = discord.utils.get(webhooks, name="IG Cleaner")
+				if not webhook:
+					webhook = await ch.create_webhook(name="IG Cleaner")
+				kwargs = {"username": utils.webhook_name(message.author.display_name), "avatar_url": message.author.display_avatar.url}
+				if isinstance(message.channel, discord.Thread):
+					kwargs["thread"] = message.channel
+				view = discord.ui.View(timeout=None)
+				view.add_item(discord.ui.Button(
+					label="Delete", emoji="🗑️",
+					style=discord.ButtonStyle.secondary,
+					custom_id=f"dellink:{message.author.id}",
+				))
+				files = [await a.to_file(spoiler=a.is_spoiler()) for a in message.attachments]
+				sent = await webhook.send(transformed, view=view, files=files, wait=True, **kwargs)
+			except discord.HTTPException as e:
+				print(f"Link repost failed in #{message.channel}: {e}", flush=True)
+				return
+			# Send first, delete second: if the delete fails, drop the repost instead of losing the message.
+			try:
+				await message.delete()
+			except discord.HTTPException as e:
+				if not isinstance(e, discord.NotFound):
+					print(f"Couldn't delete original in #{message.channel}: {e}", flush=True)
+				await sent.delete()
+
 		@client.event
 		async def on_message(message):
 			if message.author==client.user:
@@ -79,27 +159,8 @@ def run_discord_bot():
 			if user_message.startswith('\\'):
 				return
 
-			transformed = utils.transform_urls(user_message, url_rules)
-			if transformed:
-				try:
-					await message.delete()
-					ch = message.channel.parent if isinstance(message.channel, discord.Thread) else message.channel
-					webhooks = await ch.webhooks()
-					webhook = discord.utils.get(webhooks, name="IG Cleaner")
-					if not webhook:
-						webhook = await ch.create_webhook(name="IG Cleaner")
-					kwargs = {"username": message.author.display_name, "avatar_url": message.author.display_avatar.url}
-					if isinstance(message.channel, discord.Thread):
-						kwargs["thread"] = message.channel
-					view = discord.ui.View(timeout=None)
-					view.add_item(discord.ui.Button(
-						label="Delete", emoji="🗑️",
-						style=discord.ButtonStyle.secondary,
-						custom_id=f"dellink:{message.author.id}",
-					))
-					await webhook.send(transformed, view=view, **kwargs)
-				except:
-					pass
+			if not message.webhook_id and not message.author.bot and message.guild:
+				await fix_links(message, user_message)
 
 			if user_message[0] == '.':
 				rest = user_message[1:].strip()
@@ -127,6 +188,8 @@ def run_discord_bot():
 		GUILD_ID = os.environ.get("GUILD_ID")
 		game_log_channel = None
 		url_rules = []
+		fixed_cache = {}
+		http = None
 		reactions = {}
 
 		@client.event
@@ -169,6 +232,7 @@ def run_discord_bot():
 			][:25]
 
 		@urlrule.command(name="add", description="Add a URL replacement rule")
+		@discord.app_commands.describe(replacement="Fixer host, or several separated by commas to try in order")
 		@discord.app_commands.default_permissions(manage_guild=True)
 		async def urlrule_add(interaction: discord.Interaction, domain: str, replacement: str, drop: str = None):
 			nonlocal url_rules
@@ -176,7 +240,11 @@ def run_discord_bot():
 				if rule["domain"] == domain:
 					await interaction.response.send_message(f"Rule for `{domain}` already exists", ephemeral=True)
 					return
-			rule = {"domain": domain, "replacement": replacement}
+			hosts = [h.strip() for h in replacement.split(",") if h.strip()]
+			if not hosts:
+				await interaction.response.send_message("Give at least one replacement host", ephemeral=True)
+				return
+			rule = {"domain": domain, "replacement": hosts if len(hosts) > 1 else hosts[0]}
 			if drop:
 				rule["drop"] = [p.strip() for p in drop.split(",") if p.strip()]
 			url_rules.append(rule)
@@ -189,7 +257,7 @@ def run_discord_bot():
 			data["url_rules"] = url_rules.copy()
 			with open("config.json", "w") as f:
 				json.dump(data, f)
-			await interaction.response.send_message(f"✅ Rule added: `{domain}` → `{replacement}`", ephemeral=True)
+			await interaction.response.send_message(f"✅ Rule added: `{domain}` → " + " → ".join(f"`{h}`" for h in hosts), ephemeral=True)
 
 		@urlrule.command(name="remove", description="Remove a URL replacement rule")
 		@discord.app_commands.autocomplete(domain=autocomplete_domains)
@@ -219,7 +287,7 @@ def run_discord_bot():
 				await interaction.response.send_message("No rules configured.", ephemeral=True)
 				return
 			lines = [
-				f"{i+1}. `{r['domain']}` → `{r['replacement']}`" + (f" (drop: {', '.join(r['drop'])})" if r.get("drop") else "")
+				f"{i+1}. `{r['domain']}` → " + " → ".join(f"`{h}`" for h in utils.rule_hosts(r)) + (f" (drop: {', '.join(r['drop'])})" if r.get("drop") else "")
 				for i, r in enumerate(url_rules)
 			]
 			await interaction.response.send_message("\n".join(lines), ephemeral=True			)

@@ -15,5 +15,7 @@ A Discord bot for a personal server.
 | Command | Description |
 |---|---|
 | `/setgamechannel` | Set channel for game activity announcements |
+| `/urlrule add <domain> <replacement> [drop]` | Rewrite links to an embed fixer. `replacement` can list several hosts, comma-separated (`ig.reaper113.xyz,kkinstagram.com`): each is checked in order and the first one that gives Discord an image/video wins. If none does, the message is left alone. |
+| `/urlrule remove` / `/urlrule list` | Manage the rules |
 | `.hello` / `.hi` | Greeting |
 | `.inspire` / `.motivate` | Random quote |
