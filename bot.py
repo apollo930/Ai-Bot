@@ -11,6 +11,73 @@ async def send_message(message, user_message, is_private):
 		print("Error: " + str(e))
 
 
+class FixProgress:
+	"""A small silent reply under the poster's message saying which fixer is being tried.
+	It only shows up if fixing takes a moment, is deleted once the repost is sent, and on
+	failure says what was tried, with a Dismiss button (it also removes itself after a while)."""
+
+	SHOW_AFTER = 1.5  # seconds: fast fixes never flash a notice
+	FAIL_LINGER = 30  # seconds the failure notice stays before deleting itself
+
+	def __init__(self, message, urls):
+		self.message = message
+		self.lines = {u: "starting…" for u in urls}
+		self.notice = None
+		self.done = False
+		self.last_edit = 0.0
+		self.task = asyncio.create_task(self._show_later())
+
+	def _text(self):
+		return "\n".join(f"-# ⏳ {utils.short_link(u)}: {s}" for u, s in self.lines.items())
+
+	async def _show_later(self):
+		await asyncio.sleep(self.SHOW_AFTER)
+		if self.done:
+			return
+		try:
+			self.notice = await self.message.reply(self._text(), silent=True, mention_author=False,
+				allowed_mentions=discord.AllowedMentions.none())
+			self.last_edit = time.time()
+		except discord.HTTPException:
+			pass
+
+	async def update(self, url, status):
+		self.lines[url] = status
+		# Discord rate-limits edits; one a second is plenty for a progress line
+		if self.notice and not self.done and time.time() - self.last_edit >= 1:
+			self.last_edit = time.time()
+			try:
+				await self.notice.edit(content=self._text())
+			except discord.HTTPException:
+				pass
+
+	async def finish(self):
+		"""The repost went out (or nothing needed saying): remove the notice."""
+		self.done = True
+		self.task.cancel()
+		if self.notice:
+			try:
+				await self.notice.delete()
+			except discord.HTTPException:
+				pass
+
+	async def fail(self, text):
+		"""Nothing could be fixed: say why, with a Dismiss button for the poster."""
+		self.done = True
+		self.task.cancel()
+		view = discord.ui.View(timeout=None)
+		view.add_item(discord.ui.Button(label="Dismiss", style=discord.ButtonStyle.secondary,
+			custom_id=f"dismiss:{self.message.author.id}"))
+		try:
+			if self.notice:
+				await self.notice.edit(content=text, view=view, delete_after=self.FAIL_LINGER)
+			else:
+				await self.message.reply(text, view=view, silent=True, mention_author=False,
+					allowed_mentions=discord.AllowedMentions.none(), delete_after=self.FAIL_LINGER)
+		except discord.HTTPException:
+			pass
+
+
 def run_discord_bot():
 
 		intents = discord.Intents.default()
@@ -73,7 +140,7 @@ def run_discord_bot():
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
 			try:
-				async with http.get(url, timeout=aiohttp.ClientTimeout(total=6), max_redirects=5) as resp:
+				async with http.get(url, timeout=aiohttp.ClientTimeout(total=10), max_redirects=5) as resp:
 					if resp.status != 200:
 						return False
 					# kkinstagram-style fixers redirect Discordbot straight to the media file
@@ -87,13 +154,16 @@ def run_discord_bot():
 				print(f"Probe failed for {url}: {e.__class__.__name__}", flush=True)
 				return False
 
-		async def resolve(url: str, rule: dict) -> str | None:
+		async def resolve(url: str, rule: dict, progress: FixProgress) -> str | None:
 			"""First fixer URL for url that embeds, trying the rule's hosts in order."""
 			hit = fixed_cache.get(url)
 			if hit and time.time() - hit[0] < 600:
 				return hit[1]
-			for host in utils.rule_hosts(rule):
+			hosts = utils.rule_hosts(rule)
+			for i, host in enumerate(hosts):
 				candidate = utils.fix_url(url, rule, host)
+				step = f"trying `{host}`" if i == 0 else f"`{hosts[i - 1]}` failed, trying `{host}` ({i + 1}/{len(hosts)})"
+				await progress.update(url, step)
 				if await embeds(candidate):
 					if len(fixed_cache) > 500:
 						fixed_cache.clear()
@@ -161,12 +231,30 @@ def run_discord_bot():
 			if sum(a.size for a in message.attachments) > limit:
 				return
 			unique = {url: rule for _s, _e, url, rule in links}
-			results = await asyncio.gather(*(resolve(u, r) for u, r in unique.items()))
+			progress = FixProgress(message, unique)
+			try:
+				if not await repost_fixed(message, user_message, links, unique, limit, progress):
+					tried = "; ".join(f"{utils.short_link(u)}: " + ", ".join(f"`{h}`" for h in utils.rule_hosts(r)) for u, r in unique.items())
+					await progress.fail(f"-# ⚠️ Couldn't fix the embed, so your message is left as is. Tried {tried}.")
+					return
+			except Exception:
+				await progress.finish()
+				raise
+			await progress.finish()
+
+		async def repost_fixed(message, user_message, links, unique, limit, progress) -> bool:
+			"""Repost with fixed links. False when no link could be fixed (nothing was posted)."""
+			results = await asyncio.gather(*(resolve(u, r, progress) for u, r in unique.items()))
 			chosen = {u: fixed for u, fixed in zip(unique, results) if fixed}
+			for u in unique:
+				if u in chosen:
+					await progress.update(u, "✓ fixed, posting…")
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
 			gallery, gallery_url = None, None
 			for url in unique:
+				if utils.instagram_shortcode(url):
+					await progress.update(url, "fetching the photos…")
 				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit)
 				if gallery:
 					gallery_url = url
@@ -174,13 +262,13 @@ def run_discord_bot():
 					chosen[url] = f"<{utils.instagram_url(url)}>"
 					break
 			if not chosen:
-				return  # no fixer works right now: leave the original alone
+				return False  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			ref = message.reference.resolved if message.reference else None
 			if isinstance(ref, discord.Message):
 				transformed = f"-# ↪ replying to [{ref.author.display_name}]({ref.jump_url})\n{transformed}"
 			if len(transformed) > 2000:
-				return
+				return True  # too long to repost; nothing to warn about
 			try:
 				ch = message.channel.parent if isinstance(message.channel, discord.Thread) else message.channel
 				webhooks = await ch.webhooks()
@@ -209,7 +297,7 @@ def run_discord_bot():
 				sent = await webhook.send(transformed, view=view, files=files, wait=True, **kwargs)
 			except discord.HTTPException as e:
 				print(f"Link repost failed in #{message.channel}: {e}", flush=True)
-				return
+				return True
 			# Send first, delete second: if the delete fails, drop the repost instead of losing the message.
 			try:
 				await message.delete()
@@ -217,6 +305,7 @@ def run_discord_bot():
 				if not isinstance(e, discord.NotFound):
 					print(f"Couldn't delete original in #{message.channel}: {e}", flush=True)
 				await sent.delete()
+			return True
 
 		@client.event
 		async def on_message(message):
@@ -246,11 +335,11 @@ def run_discord_bot():
 			if not interaction.data or "custom_id" not in interaction.data:
 				return
 			cid = interaction.data["custom_id"]
-			if not cid.startswith("dellink:"):
+			if not cid.startswith(("dellink:", "dismiss:")):
 				return
 			author_id = int(cid.split(":", 1)[1])
 			if interaction.user.id != author_id and not interaction.user.guild_permissions.manage_messages:
-				await interaction.response.send_message("Not your link!", ephemeral=True)
+				await interaction.response.send_message("Only the poster or a mod can do that.", ephemeral=True)
 				return
 			await interaction.response.defer()
 			await interaction.message.delete()
@@ -285,12 +374,13 @@ def run_discord_bot():
 			if not channel.permissions_for(interaction.guild.me).send_messages:
 				await interaction.response.send_message("I can't send messages there!", ephemeral=True)
 				return
-			data = {"game_log_channel_id": channel.id}
+			data = {}
 			try:
 				with open("config.json") as f:
-					data["url_rules"] = json.load(f).get("url_rules", [])
+					data = json.load(f)  # keep url_rules, reactions and anything else saved there
 			except (FileNotFoundError, json.JSONDecodeError):
 				pass
+			data["game_log_channel_id"] = channel.id
 			with open("config.json", "w") as f:
 				json.dump(data, f)
 			game_log_channel = channel

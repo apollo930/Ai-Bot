@@ -137,6 +137,16 @@ def open_button(url: str) -> tuple[str, str] | None:
     return None
 
 
+def short_link(url: str) -> str:
+    """Compact label for a link in status notices: host plus a short path, not clickable."""
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").removeprefix("www.")
+    path = parsed.path.rstrip("/")
+    if len(path) > 30:
+        path = path[:29] + "…"
+    return f"`{host}{path}`"
+
+
 def webhook_name(name: str) -> str:
     """Discord rejects webhook usernames containing "discord" or "clyde"."""
     name = re.sub(r"discord|clyde", "", name or "", flags=re.IGNORECASE).strip()[:80]
