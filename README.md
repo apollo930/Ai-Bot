@@ -8,6 +8,7 @@ A Discord bot for a personal server.
 2. Copy `.env.example` to `.env` and fill in:
    - `BOT_TOKEN` — Discord bot token
    - `GUILD_ID` — (optional) server ID for instant slash commands
+   - `INSTAFIX_API` — (optional) InstaFix instance with the `/api/p/<id>` endpoint, e.g. `https://ig.reaper113.xyz`. Multi-photo Instagram posts are then reposted with the photos attached (up to 10, as a Discord gallery) instead of one grid image.
 3. `uv run python3 main.py`
 
 ## Commands

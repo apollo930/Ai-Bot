@@ -102,6 +102,25 @@ def rewrite_links(text: str, links, chosen: dict) -> str:
     return "".join(out)
 
 
+IG_POST_RE = re.compile(r"^/(?:[\w.]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
+
+
+def instagram_shortcode(url: str) -> str | None:
+    """Post id from an Instagram post/reel URL, or None (profiles, stories, share links)."""
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.hostname or not matches_domain(parsed.hostname, "instagram.com"):
+        return None
+    m = IG_POST_RE.match(parsed.path)
+    return m.group(1) if m else None
+
+
+def instagram_url(url: str) -> str:
+    """The post on instagram.com itself, minus tracking params (for the "Open on Instagram" button)."""
+    parsed = urllib.parse.urlparse(url)
+    query = "&".join(f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k == "img_index")
+    return urllib.parse.urlunparse(parsed._replace(scheme="https", netloc="www.instagram.com", query=query, fragment=""))
+
+
 def webhook_name(name: str) -> str:
     """Discord rejects webhook usernames containing "discord" or "clyde"."""
     name = re.sub(r"discord|clyde", "", name or "", flags=re.IGNORECASE).strip()[:80]

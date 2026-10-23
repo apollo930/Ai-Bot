@@ -1,4 +1,4 @@
-import discord, os, utils, json, asyncio, time, aiohttp
+import discord, os, utils, json, asyncio, time, aiohttp, io
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -102,15 +102,77 @@ def run_discord_bot():
 				print(f"Fixer {host} has no embed for {url}", flush=True)
 			return None
 
+		async def instagram_gallery(url: str, room: int, size_limit: int):
+			"""For a multi-photo Instagram post: (files, embed, total photos), so the
+			repost carries the real photos as a Discord gallery instead of one grid image.
+			None for single photos, reels, or when INSTAFIX_API isn't set."""
+			code = utils.instagram_shortcode(url)
+			if not INSTAFIX_API or not code or room <= 0:
+				return None
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(f"{INSTAFIX_API}/api/p/{code}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+					if resp.status != 200:
+						return None
+					post = await resp.json(content_type=None)
+			except Exception as e:
+				print(f"InstaFix API failed for {code}: {e.__class__.__name__}", flush=True)
+				return None
+			media = post.get("media") or []
+			photos = [m["url"] for m in media if m.get("type") == "image"]
+			if len(media) < 2 or not photos:
+				return None
+
+			async def download(i, photo_url):
+				try:
+					async with http.get(photo_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+						if resp.status != 200 or (resp.content_length or 0) > size_limit:
+							return None
+						data = await resp.read()
+						if len(data) > size_limit:
+							return None
+						ext = ".png" if resp.content_type == "image/png" else ".webp" if resp.content_type == "image/webp" else ".jpg"
+						return discord.File(io.BytesIO(data), filename=f"{code}_{i + 1}{ext}")
+				except Exception as e:
+					print(f"Photo download failed for {code}: {e.__class__.__name__}", flush=True)
+					return None
+
+			files = [f for f in await asyncio.gather(*(download(i, u) for i, u in enumerate(photos[:room]))) if f]
+			if not files:
+				return None
+			embed = discord.Embed(url=utils.instagram_url(url), color=0xE1306C)
+			if post.get("username"):
+				embed.set_author(name=f"@{post['username']}", url=f"https://www.instagram.com/{post['username']}/")
+			caption = (post.get("caption") or "").strip()
+			if caption:
+				embed.description = caption if len(caption) <= 300 else caption[:297] + "..."
+			videos = len(media) - len(photos)
+			if videos:
+				embed.set_footer(text=f"+ {videos} video{'s' if videos > 1 else ''} on Instagram")
+			return files, embed, len(photos)
+
 		async def fix_links(message, user_message):
 			links = utils.find_links(user_message, url_rules)[:5]
 			if not links or message.flags.suppress_embeds:
 				return
-			if sum(a.size for a in message.attachments) > message.guild.filesize_limit:
+			limit = message.guild.filesize_limit
+			if sum(a.size for a in message.attachments) > limit:
 				return
 			unique = {url: rule for _s, _e, url, rule in links}
 			results = await asyncio.gather(*(resolve(u, r) for u, r in unique.items()))
 			chosen = {u: fixed for u, fixed in zip(unique, results) if fixed}
+
+			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
+			gallery, gallery_url = None, None
+			for url in unique:
+				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit)
+				if gallery:
+					gallery_url = url
+					# the photos are attached, so the link itself shouldn't embed a grid too
+					chosen[url] = f"<{utils.instagram_url(url)}>"
+					break
 			if not chosen:
 				return  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
@@ -129,12 +191,21 @@ def run_discord_bot():
 				if isinstance(message.channel, discord.Thread):
 					kwargs["thread"] = message.channel
 				view = discord.ui.View(timeout=None)
+				# Instagram links get a button to the post itself (2x speed, comments, the rest of a long carousel)
+				for url in [u for u in unique if u in chosen and utils.instagram_shortcode(u)][:4]:
+					label = "Open on Instagram"
+					if url == gallery_url and gallery[2] > len(gallery[0]):
+						label = f"See all {gallery[2]} on Instagram"
+					view.add_item(discord.ui.Button(label=label, url=utils.instagram_url(url)))
 				view.add_item(discord.ui.Button(
 					label="Delete", emoji="🗑️",
 					style=discord.ButtonStyle.secondary,
 					custom_id=f"dellink:{message.author.id}",
 				))
 				files = [await a.to_file(spoiler=a.is_spoiler()) for a in message.attachments]
+				if gallery:
+					files += gallery[0]
+					kwargs["embed"] = gallery[1]
 				sent = await webhook.send(transformed, view=view, files=files, wait=True, **kwargs)
 			except discord.HTTPException as e:
 				print(f"Link repost failed in #{message.channel}: {e}", flush=True)
@@ -186,6 +257,8 @@ def run_discord_bot():
 
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")
+		# InstaFix instance with the /api/p/<id> endpoint (e.g. https://ig.reaper113.xyz); blank = no photo galleries
+		INSTAFIX_API = (os.environ.get("INSTAFIX_API") or "").strip().rstrip("/")
 		game_log_channel = None
 		url_rules = []
 		fixed_cache = {}
