@@ -1,4 +1,4 @@
-import random, requests, json, os, re, urllib.parse
+import random, requests, json, os, re, sqlite3, time, urllib.parse
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -134,6 +134,17 @@ def page_lang(html: str) -> str | None:
     return m.group(1) if m else None
 
 
+CARD_RE = re.compile(r"""<meta\b[^>]*\b(?:name|property)\s*=\s*["']twitter:card["'][^>]*>""", re.IGNORECASE)
+
+
+def page_media(html: str) -> str | None:
+    """"video", "image" or None (text only) from a fixer page's twitter:card."""
+    m = CARD_RE.search(html or "")
+    attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(m.group(0))} if m else {}
+    card = attrs.get("content", "")
+    return "video" if card == "player" else "image" if card == "summary_large_image" else None
+
+
 def x_status(url: str) -> tuple[str, str] | None:
     """(user, status id) from an x.com/twitter.com post URL, or None."""
     parsed = urllib.parse.urlparse(url)
@@ -209,3 +220,69 @@ def get_response(message:str) -> str:
 def clip(text: str, limit: int) -> str:
     """text cut to at most limit characters, with "..." when cut."""
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def download_link(url: str, media: str | None, x_host: str, instafix: str) -> str | None:
+    """Link that opens the post's media file itself (best quality), for the Download button.
+    Both fixers resolve it fresh on every click, so the button keeps working after CDN links expire."""
+    if media not in ("video", "image"):
+        return None
+    status = x_status(url)
+    if status:
+        # FxEmbed sends /status/<id>.mp4 to the post's first video or photo, whichever it has
+        return f"https://{x_host}/{status[0]}/status/{status[1]}.mp4"
+    code = instagram_shortcode(url)
+    if code and instafix:
+        return f"{instafix}/{'videos' if media == 'video' else 'images'}/{code}/1"
+    return None
+
+
+def link_key(url: str) -> str:
+    """Same key for every link to one post (x.com and twitter.com, tracking params, www.)."""
+    status = x_status(url)
+    if status:
+        return f"x:{status[1]}"
+    code = instagram_shortcode(url)
+    if code:
+        return f"ig:{code}"
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").removeprefix("www.").removeprefix("m.")
+    query = "&".join(f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k in KEEP_PARAMS)
+    return f"{host}{parsed.path.rstrip('/')}" + (f"?{query}" if query else "")
+
+
+class SeenLinks:
+    """First repost of each post per server, so a later share can say "posted before" and link to it.
+    Kept in SQLite next to config.json so it survives restarts and deploys."""
+
+    def __init__(self, path: str):
+        self.db = sqlite3.connect(path)
+        self.db.execute("""CREATE TABLE IF NOT EXISTS seen (
+            guild_id INTEGER, key TEXT, message_id INTEGER, jump_url TEXT, author TEXT, posted_at INTEGER,
+            PRIMARY KEY (guild_id, key))""")
+        self.db.execute("CREATE INDEX IF NOT EXISTS seen_message ON seen (message_id)")
+        self.db.commit()
+
+    def earlier(self, guild_id: int, keys) -> dict[str, tuple[str, str, int]]:
+        """key -> (jump url, author name, unix time) for the keys posted here before."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        rows = self.db.execute(
+            f"SELECT key, jump_url, author, posted_at FROM seen WHERE guild_id = ? AND key IN ({','.join('?' * len(keys))})",
+            [guild_id, *keys],
+        )
+        return {key: (jump, author, posted_at) for key, jump, author, posted_at in rows}
+
+    def remember(self, guild_id: int, keys, message_id: int, jump_url: str, author: str):
+        """Keeps the first post of each key; later reposts don't replace it."""
+        now = int(time.time())
+        self.db.executemany(
+            "INSERT OR IGNORE INTO seen VALUES (?, ?, ?, ?, ?, ?)",
+            [(guild_id, key, message_id, jump_url, author, now) for key in keys],
+        )
+        self.db.commit()
+
+    def forget(self, message_id: int):
+        self.db.execute("DELETE FROM seen WHERE message_id = ?", (message_id,))
+        self.db.commit()

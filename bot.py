@@ -74,7 +74,8 @@ def run_discord_bot():
 
 		async def embed_problem(url: str, page: dict | None = None) -> str | None:
 			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
-			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)."""
+			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)
+			and what media the post has ("video", "image" or None, for the Download button)."""
 			nonlocal http
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
@@ -84,12 +85,15 @@ def run_discord_bot():
 						return f"HTTP {resp.status}"
 					# kkinstagram-style fixers redirect Discordbot straight to the media file
 					if resp.content_type.startswith(("image/", "video/")):
+						if page is not None:
+							page["media"] = resp.content_type.split("/")[0]
 						return None
 					if "html" not in resp.content_type:
 						return f"answered with {resp.content_type}"
 					html = (await resp.content.read(256 * 1024)).decode("utf-8", errors="replace")
 					if page is not None:
 						page["lang"] = utils.page_lang(html)
+						page["media"] = utils.page_media(html)
 					if utils.has_embed_media(html):
 						return None
 					return "no image/video in its page (post not found or blocked)"
@@ -99,34 +103,39 @@ def run_discord_bot():
 				print(f"Probe failed for {url}: {e.__class__.__name__}", flush=True)
 				return f"couldn't connect ({e.__class__.__name__})"
 
-		async def resolve(url: str, rule: dict, steps: list) -> str | None:
-			"""First fixer URL for url that embeds, trying the rule's hosts in order.
+		async def resolve(url: str, rule: dict, steps: list) -> tuple[str | None, str | None]:
+			"""(first fixer URL for url that embeds, its media kind), trying the rule's hosts in order.
 			Each attempt goes into steps, for "Apps → Embed details"."""
 			hit = fixed_cache.get(url)
 			if hit and time.time() - hit[0] < 600:
 				steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
-				return hit[1]
+				return hit[1], hit[2]
 			candidates = [(host, utils.fix_url(url, rule, host), "") for host in utils.rule_hosts(rule)]
-			checked = {}
+			checked, pages = {}, {}
 			if utils.x_status(url) and candidates:
 				# Our FxEmbed translates through the private translator, so non-English posts go
 				# there first. FxEmbed fixers (fixupx, ours) state the post's language in their page.
-				first, page = candidates[0][1], {}
-				checked[first] = await embed_problem(first, page)
-				lang = page.get("lang")
+				first = candidates[0][1]
+				pages[first] = {}
+				checked[first] = await embed_problem(first, pages[first])
+				lang = pages[first].get("lang")
 				if utils.needs_translation(lang):
 					candidates.insert(0, (FXEMBED_HOST, utils.translated_x_url(url, FXEMBED_HOST), f", translated from `{lang}`"))
 			for host, candidate, note in candidates:
-				problem = checked[candidate] if candidate in checked else await embed_problem(candidate)
+				if candidate not in checked:
+					pages[candidate] = {}
+					checked[candidate] = await embed_problem(candidate, pages[candidate])
+				problem = checked[candidate]
 				if problem is None:
 					steps.append(f"✓ `{host}`: used{note}")
+					media = pages[candidate].get("media")
 					if len(fixed_cache) > 500:
 						fixed_cache.clear()
-					fixed_cache[url] = (time.time(), candidate)
-					return candidate
+					fixed_cache[url] = (time.time(), candidate, media)
+					return candidate, media
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
-			return None
+			return None, None
 
 		async def instagram_gallery(url: str, room: int, size_limit: int):
 			"""For a multi-photo Instagram post: (files, embed, total photos), so the
@@ -233,7 +242,8 @@ def run_discord_bot():
 		async def repost_fixed(message, user_message, links, unique, limit, steps):
 			"""Repost with fixed links. Returns (fixed_any, the repost or None)."""
 			results = await asyncio.gather(*(resolve(u, r, steps[u]) for u, r in unique.items()))
-			chosen = {u: fixed for u, fixed in zip(unique, results) if fixed}
+			chosen = {u: fixed for u, (fixed, _media) in zip(unique, results) if fixed}
+			media = {u: kind for u, (_fixed, kind) in zip(unique, results)}
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
 			gallery, gallery_url = None, None
@@ -248,6 +258,10 @@ def run_discord_bot():
 			if not chosen:
 				return False, None  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
+			# 🔁 for posts someone already shared here, linking to that first repost
+			keys = {utils.link_key(u) for u in chosen}
+			for key, (jump_url, name, posted_at) in seen_links.earlier(message.guild.id, keys).items():
+				transformed += f"\n-# 🔁 posted before by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>: {jump_url}"
 			ref = message.reference.resolved if message.reference else None
 			if isinstance(ref, discord.Message):
 				transformed = f"-# ↪ replying to [{ref.author.display_name}]({ref.jump_url})\n{transformed}"
@@ -270,6 +284,10 @@ def run_discord_bot():
 					if url == gallery_url and gallery[2] > len(gallery[0]):
 						label = f"See all {gallery[2]} on Instagram"
 					view.add_item(discord.ui.Button(label=label, url=link))
+					# the photos of a gallery are attached already, so it doesn't get a Download button
+					download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API)
+					if download:
+						view.add_item(discord.ui.Button(label="Download", emoji="⬇️", url=download))
 				view.add_item(discord.ui.Button(
 					label="Delete", emoji="🗑️",
 					style=discord.ButtonStyle.secondary,
@@ -292,6 +310,7 @@ def run_discord_bot():
 					print(f"Couldn't delete original in #{message.channel}: {e}", flush=True)
 				await sent.delete()
 				return True, None
+			seen_links.remember(message.guild.id, keys, sent.id, sent.jump_url, message.author.display_name)
 			return True, sent
 
 		@client.event
@@ -318,6 +337,10 @@ def run_discord_bot():
 					await send_message(message, user_message, False)
 
 		@client.event
+		async def on_raw_message_delete(payload):
+			seen_links.forget(payload.message_id)  # a deleted repost no longer counts as posted before
+
+		@client.event
 		async def on_interaction(interaction: discord.Interaction):
 			if not interaction.data or "custom_id" not in interaction.data:
 				return
@@ -341,6 +364,7 @@ def run_discord_bot():
 		url_rules = []
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
+		seen_links = utils.SeenLinks("links.db")
 		http = None
 		reactions = {}
 
