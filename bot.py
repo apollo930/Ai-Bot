@@ -346,7 +346,8 @@ def run_discord_bot():
 			# 🔁 for posts someone already shared here, linking to that first repost
 			keys = {utils.link_key(u) for u in [*chosen, *song_buttons]}
 			for key, (jump_url, name, posted_at) in seen_links.earlier(message.guild.id, keys).items():
-				transformed += f"\n-# 🔁 posted before by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>: {jump_url}"
+				# [text](<url>): a bare message link makes Discord preview the whole earlier repost (embed and all)
+				transformed += f"\n-# 🔁 [posted before](<{jump_url}>) by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>"
 			ref = message.reference.resolved if message.reference else None
 			if isinstance(ref, discord.Message):
 				transformed = f"-# ↪ replying to [{ref.author.display_name}]({ref.jump_url})\n{transformed}"
