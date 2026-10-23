@@ -257,8 +257,8 @@ def run_discord_bot():
 
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")
-		# InstaFix instance with the /api/p/<id> endpoint (e.g. https://ig.reaper113.xyz); blank = no photo galleries
-		INSTAFIX_API = (os.environ.get("INSTAFIX_API") or "").strip().rstrip("/")
+		# InstaFix instance with the /api/p/<id> endpoint, used for multi-photo Instagram galleries
+		INSTAFIX_API = "https://ig.reaper113.xyz"
 		game_log_channel = None
 		url_rules = []
 		fixed_cache = {}
