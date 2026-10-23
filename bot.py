@@ -72,8 +72,9 @@ def run_discord_bot():
 				print(f"Slash command sync failed: {e}", flush=True)
 			print(f"{client.user} is ready!", flush=True)
 
-		async def embed_problem(url: str) -> str | None:
-			"""None if Discord would get a media embed from this fixer URL, else what went wrong."""
+		async def embed_problem(url: str, page: dict | None = None) -> str | None:
+			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
+			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)."""
 			nonlocal http
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
@@ -86,8 +87,10 @@ def run_discord_bot():
 						return None
 					if "html" not in resp.content_type:
 						return f"answered with {resp.content_type}"
-					body = await resp.content.read(256 * 1024)
-					if utils.has_embed_media(body.decode("utf-8", errors="replace")):
+					html = (await resp.content.read(256 * 1024)).decode("utf-8", errors="replace")
+					if page is not None:
+						page["lang"] = utils.page_lang(html)
+					if utils.has_embed_media(html):
 						return None
 					return "no image/video in its page (post not found or blocked)"
 			except TimeoutError:
@@ -107,9 +110,10 @@ def run_discord_bot():
 			checked = {}
 			if utils.x_status(url) and candidates:
 				# Our FxEmbed translates through the private translator, so non-English posts go
-				# there first. Ask for the language while the first fixer is already being probed.
-				first = candidates[0][1]
-				lang, checked[first] = await asyncio.gather(tweet_language(url), embed_problem(first))
+				# there first. FxEmbed fixers (fixupx, ours) state the post's language in their page.
+				first, page = candidates[0][1], {}
+				checked[first] = await embed_problem(first, page)
+				lang = page.get("lang")
 				if utils.needs_translation(lang):
 					candidates.insert(0, (FXEMBED_HOST, utils.translated_x_url(url, FXEMBED_HOST), f", translated from `{lang}`"))
 			for host, candidate, note in candidates:
@@ -123,24 +127,6 @@ def run_discord_bot():
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
 			return None
-
-		async def tweet_language(url: str) -> str | None:
-			"""The post's language code from our FxEmbed API, or None if it can't tell."""
-			nonlocal http
-			status = utils.x_status(url)
-			if not FXEMBED_API or not status:
-				return None
-			if http is None or http.closed:
-				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
-			try:
-				async with http.get(f"{FXEMBED_API}/2/status/{status[1]}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-					if resp.status != 200:
-						return None
-					data = await resp.json(content_type=None)
-				return (data.get("status") or {}).get("lang")
-			except Exception as e:
-				print(f"FxEmbed API failed for {status[1]}: {e.__class__.__name__}", flush=True)
-				return None
 
 		async def instagram_gallery(url: str, room: int, size_limit: int):
 			"""For a multi-photo Instagram post: (files, embed, total photos), so the
@@ -349,9 +335,7 @@ def run_discord_bot():
 		GUILD_ID = os.environ.get("GUILD_ID")
 		# InstaFix instance with the /api/p/<id> endpoint, used for multi-photo Instagram galleries
 		INSTAFIX_API = "https://ig.reaper113.xyz"
-		# Our FxEmbed instance: its API tells a post's language, and its embed host translates
-		# non-English posts (link + /en) through the translator on the same server
-		FXEMBED_API = "https://xapi.reaper113.xyz"
+		# Our FxEmbed instance: it translates non-English posts (link + /en) through the translator on the same server
 		FXEMBED_HOST = "x.reaper113.xyz"
 		game_log_channel = None
 		url_rules = []

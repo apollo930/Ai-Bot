@@ -125,6 +125,15 @@ X_STATUS_RE = re.compile(r"^/([\w]+)/status(?:es)?/(\d+)")
 NOT_A_LANGUAGE = {"", "und", "zxx", "qme", "qam", "qht", "qct", "qst", "art"}
 
 
+HTML_LANG_RE = re.compile(r"<html\b[^>]*\blang\s*=\s*[\"']?([\w-]+)", re.IGNORECASE)
+
+
+def page_lang(html: str) -> str | None:
+    """The lang attribute of a page's <html> tag (FxEmbed sets it to the post's language)."""
+    m = HTML_LANG_RE.search(html or "")
+    return m.group(1) if m else None
+
+
 def x_status(url: str) -> tuple[str, str] | None:
     """(user, status id) from an x.com/twitter.com post URL, or None."""
     parsed = urllib.parse.urlparse(url)
