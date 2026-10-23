@@ -191,12 +191,12 @@ def run_discord_bot():
 				if isinstance(message.channel, discord.Thread):
 					kwargs["thread"] = message.channel
 				view = discord.ui.View(timeout=None)
-				# Instagram links get a button to the post itself (2x speed, comments, the rest of a long carousel)
-				for url in [u for u in unique if u in chosen and utils.instagram_shortcode(u)][:4]:
-					label = "Open on Instagram"
+				# Instagram and X links get a button to the post itself (2x speed, replies, the rest of a long carousel)
+				buttons = [(u, utils.open_button(u)) for u in unique if u in chosen]
+				for url, (label, link) in [(u, b) for u, b in buttons if b][:4]:
 					if url == gallery_url and gallery[2] > len(gallery[0]):
 						label = f"See all {gallery[2]} on Instagram"
-					view.add_item(discord.ui.Button(label=label, url=utils.instagram_url(url)))
+					view.add_item(discord.ui.Button(label=label, url=link))
 				view.add_item(discord.ui.Button(
 					label="Delete", emoji="🗑️",
 					style=discord.ButtonStyle.secondary,

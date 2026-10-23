@@ -27,6 +27,9 @@ EMBED_MEDIA_KEYS = {
     "twitter:image", "twitter:player", "twitter:player:stream",
 }
 META_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+# FxEmbed (fixupx, x.reaper113.xyz) gives Discord photos/videos through a Mastodon-style
+# ActivityPub link instead of og:image/og:video, and only adds it when the post was found.
+ACTIVITY_RE = re.compile(r"<link\b[^>]*application/activity\+json[^>]*>", re.IGNORECASE)
 ATTR_RE = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 
 
@@ -82,6 +85,8 @@ def fix_url(url: str, rule: dict, host: str) -> str:
 def has_embed_media(html: str) -> bool:
     """True if the page gives Discord an image/video to embed. A fixer that
     couldn't fetch the post usually still answers 200, just without media tags."""
+    if ACTIVITY_RE.search(html or ""):
+        return True
     for tag in META_RE.findall(html or ""):
         attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(tag)}
         name = (attrs.get("property") or attrs.get("name") or "").lower()
@@ -119,6 +124,17 @@ def instagram_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     query = "&".join(f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k == "img_index")
     return urllib.parse.urlunparse(parsed._replace(scheme="https", netloc="www.instagram.com", query=query, fragment=""))
+
+
+def open_button(url: str) -> tuple[str, str] | None:
+    """(label, link) for a button that opens the post on its own site, for the sites that get one."""
+    if instagram_shortcode(url):
+        return "Open on Instagram", instagram_url(url)
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    if (matches_domain(host, "x.com") or matches_domain(host, "twitter.com")) and "/status/" in parsed.path:
+        return "Open on X", urllib.parse.urlunparse(("https", "x.com", parsed.path, "", "", ""))
+    return None
 
 
 def webhook_name(name: str) -> str:
