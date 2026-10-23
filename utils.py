@@ -1,4 +1,4 @@
-import random, requests, json, os, re, sqlite3, time, urllib.parse
+import html as html_lib, random, requests, json, os, re, sqlite3, time, urllib.parse
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -222,6 +222,77 @@ def clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
+# Single-song links that get buttons for the other platforms (albums and playlists don't)
+MUSIC_DOMAINS = [{"domain": d} for d in ("open.spotify.com", "music.apple.com", "music.youtube.com")]
+SPOTIFY_TRACK_RE = re.compile(r"^/(?:intl-[\w-]+/)?track/([A-Za-z0-9]+)")
+APPLE_SONG_RE = re.compile(r"/song/(?:[^/]+/)?(\d+)")
+
+
+def music_track(url: str) -> tuple[str, str] | None:
+    """("spotify" | "apple" | "ytmusic", id) for a single-song link, else None."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    query = urllib.parse.parse_qs(parsed.query)
+    if host == "open.spotify.com":
+        m = SPOTIFY_TRACK_RE.match(parsed.path)
+        return ("spotify", m.group(1)) if m else None
+    if host == "music.apple.com":
+        if query.get("i"):
+            return "apple", query["i"][0]
+        m = APPLE_SONG_RE.search(parsed.path)
+        return ("apple", m.group(1)) if m else None
+    if host == "music.youtube.com" and parsed.path == "/watch" and query.get("v"):
+        return "ytmusic", query["v"][0]
+    return None
+
+
+def find_music_links(text: str) -> list[str]:
+    """Single-song Spotify / Apple Music / YouTube Music links in text, same skipping rules as find_links."""
+    return [url for _s, _e, url, _r in find_links(text, MUSIC_DOMAINS) if music_track(url)]
+
+
+def music_buttons(url: str, platform: str, song: str, apple_url: str | None) -> list[tuple[str, str]]:
+    """(label, link) buttons for the song on the other platforms. Apple Music links straight to the
+    song (found with Apple's search API); Spotify and YouTube Music open a search for it."""
+    buttons = []
+    if platform != "spotify":
+        buttons.append(("Spotify", f"https://open.spotify.com/search/{urllib.parse.quote(song)}"))
+    if platform != "apple" and apple_url:
+        buttons.append(("Apple Music", apple_url))
+    if platform != "ytmusic":
+        buttons.append(("YouTube Music", f"https://music.youtube.com/search?q={urllib.parse.quote_plus(song)}"))
+    platform_id = music_track(url)
+    if platform_id and platform_id[0] == "spotify":
+        url = f"https://open.spotify.com/track/{platform_id[1]}"  # without ?si= tracking
+    elif platform_id and platform_id[0] == "ytmusic":
+        url = f"https://music.youtube.com/watch?v={platform_id[1]}"
+    buttons.append(("All platforms", f"https://song.link/{url}"))
+    return buttons
+
+
+# "(Official Video)", "[4K]", "(Lyrics)" and similar video-title extras that spoil a song search
+VIDEO_EXTRAS_RE = re.compile(
+    r"\s*[(\[][^)\]]*\b(official|video|audio|lyrics?|visuali[sz]er|4k|hd|mv|m/v)\b[^)\]]*[)\]]", re.IGNORECASE
+)
+
+TRAILING_EXTRAS_RE = re.compile(r"\s+official(\s+(music|lyric))?\s+(video|audio)\s*$", re.IGNORECASE)
+
+
+def clean_song(name: str) -> str:
+    """A video title tidied into a song search: extras dropped, "Artist - Title" dash removed."""
+    name = TRAILING_EXTRAS_RE.sub("", VIDEO_EXTRAS_RE.sub("", name))
+    return re.sub(r"\s+", " ", name.replace(" - ", " ")).strip()
+
+
+def meta_content(html: str, key: str) -> str | None:
+    """content of the <meta property|name=key> tag, unescaped."""
+    for tag in META_RE.findall(html or ""):
+        attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(tag)}
+        if (attrs.get("property") or attrs.get("name") or "").lower() == key:
+            return html_lib.unescape(attrs.get("content") or "").strip() or None
+    return None
+
+
 def download_link(url: str, media: str | None, x_host: str, instafix: str) -> str | None:
     """Link that opens the post's media file itself (best quality), for the Download button.
     Both fixers resolve it fresh on every click, so the button keeps working after CDN links expire."""
@@ -245,6 +316,9 @@ def link_key(url: str) -> str:
     code = instagram_shortcode(url)
     if code:
         return f"ig:{code}"
+    song = music_track(url)
+    if song:
+        return f"{song[0]}:{song[1]}"
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").removeprefix("www.").removeprefix("m.")
     query = "&".join(f"{k}={v}" for k, v in urllib.parse.parse_qsl(parsed.query) if k in KEEP_PARAMS)

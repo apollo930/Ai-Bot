@@ -196,22 +196,79 @@ def run_discord_bot():
 				embed.set_footer(text=f"+ {videos} video{'s' if videos > 1 else ''} on Instagram")
 			return files, embed, len(photos)
 
+		async def get_json(endpoint: str, params: dict):
+			"""GET endpoint?params and parse JSON (whatever its content type), or None."""
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+					return await resp.json(content_type=None) if resp.status == 200 else None
+			except Exception as e:
+				print(f"Request failed for {endpoint}: {e.__class__.__name__}", flush=True)
+				return None
+
+		async def song_name(platform: str, sid: str) -> str | None:
+			"""'Artist Title' for a song, from the platform's own public metadata."""
+			nonlocal http
+			if platform == "apple":
+				data = await get_json("https://itunes.apple.com/lookup", {"id": sid, "country": APPLE_COUNTRY})
+				hit = (data or {}).get("results") or []
+				return f"{hit[0].get('artistName', '')} {hit[0].get('trackName', '')}".strip() if hit else None
+			if platform == "ytmusic":
+				data = await get_json("https://www.youtube.com/oembed", {"url": f"https://www.youtube.com/watch?v={sid}", "format": "json"})
+				if not data:
+					return None
+				artist = (data.get("author_name") or "").removesuffix(" - Topic")
+				title = data.get("title") or ""
+				return utils.clean_song(title if artist.lower() in title.lower() else f"{artist} {title}")
+			# Spotify: its track page names the song (og:title) and the artist (music:musician_description)
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(f"https://open.spotify.com/track/{sid}", timeout=aiohttp.ClientTimeout(total=8)) as resp:
+					html = (await resp.content.read(256 * 1024)).decode("utf-8", errors="replace") if resp.status == 200 else ""
+			except Exception as e:
+				print(f"Spotify page failed for {sid}: {e.__class__.__name__}", flush=True)
+				return None
+			title = utils.meta_content(html, "og:title")
+			artist = utils.meta_content(html, "music:musician_description") or ""
+			return f"{artist} {title}".strip() if title else None
+
+		async def music_links(url: str, steps: list) -> list[tuple[str, str]] | None:
+			"""Buttons for a single-song link on the other platforms, or None if the song can't be named."""
+			platform, sid = utils.music_track(url)
+			song = await song_name(platform, sid)
+			if not song:
+				steps.append("✗ 🎵 couldn't read the song's name, so no buttons for other platforms")
+				return None
+			apple_url = None
+			if platform != "apple":
+				data = await get_json("https://itunes.apple.com/search", {"term": song, "entity": "song", "limit": 1, "country": APPLE_COUNTRY})
+				hit = (data or {}).get("results") or []
+				apple_url = hit[0].get("trackViewUrl") if hit else None
+			steps.append(f"🎵 “{song}”: buttons for the other platforms{'' if apple_url or platform == 'apple' else ' (not found on Apple Music)'}")
+			return utils.music_buttons(url, platform, song, apple_url)
+
 		async def fix_links(message, user_message):
 			links = utils.find_links(user_message, url_rules)[:5]
-			if not links or message.flags.suppress_embeds:
+			music = utils.find_music_links(user_message)[:2]
+			if not (links or music) or message.flags.suppress_embeds:
 				return
 			limit = message.guild.filesize_limit
 			if sum(a.size for a in message.attachments) > limit:
 				return
 			unique = {url: rule for _s, _e, url, rule in links}
-			steps = {u: [] for u in unique}
+			steps = {u: [] for u in [*unique, *music]}
 			marker = asyncio.create_task(mark_working(message))
 			try:
-				fixed_any, sent = await repost_fixed(message, user_message, links, unique, limit, steps)
+				fixed_any, sent = await repost_fixed(message, user_message, links, unique, limit, steps, music)
 			finally:
 				marker.cancel()
 			remember_details(steps, message.id, sent.id if sent else None)
-			if not fixed_any:
+			if not fixed_any and not unique:
+				await set_reaction(message, None)  # only song links, and none could be named: leave it be
+			elif not fixed_any:
 				await set_reaction(message, FAILED)  # left as is; Apps → Embed details says why
 			elif sent is None:
 				await set_reaction(message, None)  # nothing was reposted, so the original stays: clear ⏳
@@ -239,9 +296,13 @@ def run_discord_bot():
 			while len(fix_details) > DETAILS_KEPT:
 				fix_details.pop(next(iter(fix_details)))
 
-		async def repost_fixed(message, user_message, links, unique, limit, steps):
-			"""Repost with fixed links. Returns (fixed_any, the repost or None)."""
-			results = await asyncio.gather(*(resolve(u, r, steps[u]) for u, r in unique.items()))
+		async def repost_fixed(message, user_message, links, unique, limit, steps, music):
+			"""Repost with fixed links and buttons for song links. Returns (fixed_any, the repost or None)."""
+			results, songs = await asyncio.gather(
+				asyncio.gather(*(resolve(u, r, steps[u]) for u, r in unique.items())),
+				asyncio.gather(*(music_links(u, steps[u]) for u in music)),
+			)
+			song_buttons = {u: b for u, b in zip(music, songs) if b}
 			chosen = {u: fixed for u, (fixed, _media) in zip(unique, results) if fixed}
 			media = {u: kind for u, (_fixed, kind) in zip(unique, results)}
 
@@ -255,11 +316,11 @@ def run_discord_bot():
 					# the photos are attached, so the link itself shouldn't embed a grid too
 					chosen[url] = f"<{utils.instagram_url(url)}>"
 					break
-			if not chosen:
+			if not chosen and not song_buttons:
 				return False, None  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			# 🔁 for posts someone already shared here, linking to that first repost
-			keys = {utils.link_key(u) for u in chosen}
+			keys = {utils.link_key(u) for u in [*chosen, *song_buttons]}
 			for key, (jump_url, name, posted_at) in seen_links.earlier(message.guild.id, keys).items():
 				transformed += f"\n-# 🔁 posted before by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>: {jump_url}"
 			ref = message.reference.resolved if message.reference else None
@@ -288,6 +349,9 @@ def run_discord_bot():
 					download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API)
 					if download:
 						view.add_item(discord.ui.Button(label="Download", emoji="⬇️", url=download))
+				for buttons in song_buttons.values():
+					for label, link in buttons:
+						view.add_item(discord.ui.Button(label=label, url=link))
 				view.add_item(discord.ui.Button(
 					label="Delete", emoji="🗑️",
 					style=discord.ButtonStyle.secondary,
@@ -360,6 +424,7 @@ def run_discord_bot():
 		INSTAFIX_API = "https://ig.reaper113.xyz"
 		# Our FxEmbed instance: it translates non-English posts (link + /en) through the translator on the same server
 		FXEMBED_HOST = "x.reaper113.xyz"
+		APPLE_COUNTRY = "IN"  # Apple Music store the "Apple Music" button links into
 		game_log_channel = None
 		url_rules = []
 		fixed_cache = {}
