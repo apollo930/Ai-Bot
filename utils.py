@@ -175,13 +175,13 @@ def instagram_url(url: str) -> str:
 
 
 def open_button(url: str) -> tuple[str, str] | None:
-    """(label, link) for a button that opens the post on its own site, for the sites that get one."""
+    """(site, link) for a button that opens the post on its own site, for the sites that get one."""
     if instagram_shortcode(url):
-        return "Open on Instagram", instagram_url(url)
+        return "instagram", instagram_url(url)
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""
     if (matches_domain(host, "x.com") or matches_domain(host, "twitter.com")) and "/status/" in parsed.path:
-        return "Open on X", urllib.parse.urlunparse(("https", "x.com", parsed.path, "", "", ""))
+        return "x", urllib.parse.urlunparse(("https", "x.com", parsed.path, "", "", ""))
     return None
 
 
@@ -252,21 +252,21 @@ def find_music_links(text: str) -> list[str]:
 
 
 def music_buttons(url: str, platform: str, song: str, apple_url: str | None) -> list[tuple[str, str]]:
-    """(label, link) buttons for the song on the other platforms. Apple Music links straight to the
+    """(platform, link) buttons for the song on the other platforms. Apple Music links straight to the
     song (found with Apple's search API); Spotify and YouTube Music open a search for it."""
     buttons = []
     if platform != "spotify":
-        buttons.append(("Spotify", f"https://open.spotify.com/search/{urllib.parse.quote(song)}"))
+        buttons.append(("spotify", f"https://open.spotify.com/search/{urllib.parse.quote(song)}"))
     if platform != "apple" and apple_url:
-        buttons.append(("Apple Music", apple_url))
+        buttons.append(("applemusic", apple_url))
     if platform != "ytmusic":
-        buttons.append(("YouTube Music", f"https://music.youtube.com/search?q={urllib.parse.quote_plus(song)}"))
+        buttons.append(("youtubemusic", f"https://music.youtube.com/search?q={urllib.parse.quote_plus(song)}"))
     platform_id = music_track(url)
     if platform_id and platform_id[0] == "spotify":
         url = f"https://open.spotify.com/track/{platform_id[1]}"  # without ?si= tracking
     elif platform_id and platform_id[0] == "ytmusic":
         url = f"https://music.youtube.com/watch?v={platform_id[1]}"
-    buttons.append(("All platforms", f"https://song.link/{url}"))
+    buttons.append(("songlink", f"https://song.link/{url}"))
     return buttons
 
 

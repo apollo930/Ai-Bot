@@ -1,4 +1,4 @@
-import discord, os, utils, json, asyncio, time, aiohttp, io
+import discord, os, utils, json, asyncio, time, aiohttp, io, glob
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -14,6 +14,11 @@ async def send_message(message, user_message, is_private):
 WORKING, FAILED = "⏳", "⚠️"  # reactions on the poster's message while fixing / when nothing could be fixed
 SHOW_WORKING_AFTER = 1.5  # seconds: fast fixes never flash a reaction
 DETAILS_KEPT = 300  # fixes whose details "Apps → Embed details" can still show
+# Link buttons show only an emoji: the logo from emojis/btn_<kind>.png, or these until it's uploaded
+PLAIN_BUTTON_EMOJI = {
+	"instagram": "📸", "x": "✖️", "download": "⬇️",
+	"spotify": "🟢", "applemusic": "🍎", "youtubemusic": "▶️", "songlink": "🔗",
+}
 
 
 def run_discord_bot():
@@ -70,7 +75,26 @@ def run_discord_bot():
 				print(f"Synced {len(synced)} command(s)", flush=True)
 			except Exception as e:
 				print(f"Slash command sync failed: {e}", flush=True)
+			await load_button_emojis()
 			print(f"{client.user} is ready!", flush=True)
+
+		async def load_button_emojis():
+			"""Logo emojis for the link buttons: emojis/*.png, uploaded once as the bot's own
+			application emojis (usable in every server). Missing ones fall back to plain emojis."""
+			try:
+				have = {e.name: e for e in await client.fetch_application_emojis()}
+				for path in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "emojis", "*.png"))):
+					name = os.path.splitext(os.path.basename(path))[0]
+					if name not in have:
+						with open(path, "rb") as f:
+							have[name] = await client.create_application_emoji(name=name, image=f.read())
+						print(f"Uploaded button emoji :{name}:", flush=True)
+				app_emojis.update(have)
+			except Exception as e:
+				print(f"Button emojis unavailable, using plain ones: {e}", flush=True)
+
+		def button_emoji(kind: str):
+			return app_emojis.get(f"btn_{kind}") or PLAIN_BUTTON_EMOJI[kind]
 
 		async def embed_problem(url: str, page: dict | None = None) -> str | None:
 			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
@@ -338,30 +362,44 @@ def run_discord_bot():
 				kwargs = {"username": utils.webhook_name(message.author.display_name), "avatar_url": message.author.display_avatar.url}
 				if isinstance(message.channel, discord.Thread):
 					kwargs["thread"] = message.channel
-				view = discord.ui.View(timeout=None)
-				# Instagram and X links get a button to the post itself (2x speed, replies, the rest of a long carousel)
-				buttons = [(u, utils.open_button(u)) for u in unique if u in chosen]
-				for url, (label, link) in [(u, b) for u, b in buttons if b][:4]:
-					if url == gallery_url and gallery[2] > len(gallery[0]):
-						label = f"See all {gallery[2]} on Instagram"
-					view.add_item(discord.ui.Button(label=label, url=link))
-					# the photos of a gallery are attached already, so it doesn't get a Download button
-					download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API)
-					if download:
-						view.add_item(discord.ui.Button(label="Download", emoji="⬇️", url=download))
-				for buttons in song_buttons.values():
-					for label, link in buttons:
-						view.add_item(discord.ui.Button(label=label, url=link))
-				view.add_item(discord.ui.Button(
-					label="Delete", emoji="🗑️",
-					style=discord.ButtonStyle.secondary,
-					custom_id=f"dellink:{message.author.id}",
-				))
-				files = [await a.to_file(spoiler=a.is_spoiler()) for a in message.attachments]
-				if gallery:
-					files += gallery[0]
-					kwargs["embed"] = gallery[1]
-				sent = await webhook.send(transformed, view=view, files=files, wait=True, **kwargs)
+
+				def buttons_view():
+					view = discord.ui.View(timeout=None)
+					# Instagram and X links get a button to the post itself (2x speed, replies, the rest of a long carousel)
+					buttons = [(u, utils.open_button(u)) for u in unique if u in chosen]
+					for url, (site, link) in [(u, b) for u, b in buttons if b][:4]:
+						label = f"All {gallery[2]}" if url == gallery_url and gallery[2] > len(gallery[0]) else None
+						view.add_item(discord.ui.Button(label=label, emoji=button_emoji(site), url=link))
+						# the photos of a gallery are attached already, so it doesn't get a Download button
+						download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API)
+						if download:
+							view.add_item(discord.ui.Button(emoji=button_emoji("download"), url=download))
+					for buttons in song_buttons.values():
+						for platform, link in buttons:
+							view.add_item(discord.ui.Button(emoji=button_emoji(platform), url=link))
+					view.add_item(discord.ui.Button(
+						emoji="🗑️",
+						style=discord.ButtonStyle.danger,
+						custom_id=f"dellink:{message.author.id}",
+					))
+					return view
+
+				async def send():
+					files = [await a.to_file(spoiler=a.is_spoiler()) for a in message.attachments]
+					if gallery:
+						files += [discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename) for f in gallery[0]]
+						kwargs["embed"] = gallery[1]
+					return await webhook.send(transformed, view=buttons_view(), files=files, wait=True, **kwargs)
+
+				try:
+					sent = await send()
+				except discord.HTTPException as e:
+					if not app_emojis or "emoji" not in str(e).lower():
+						raise
+					# Discord refused the logo emojis: use the plain ones from now on
+					print(f"Logo emojis rejected, switching to plain ones: {e}", flush=True)
+					app_emojis.clear()
+					sent = await send()
 			except discord.HTTPException as e:
 				print(f"Link repost failed in #{message.channel}: {e}", flush=True)
 				steps[next(iter(steps))].append(f"✗ reposting failed: {e}")
@@ -430,6 +468,7 @@ def run_discord_bot():
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
 		seen_links = utils.SeenLinks("links.db")
+		app_emojis = {}  # name -> the bot's application emoji (button logos from emojis/)
 		http = None
 		reactions = {}
 
