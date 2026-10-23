@@ -119,6 +119,34 @@ def instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+X_STATUS_RE = re.compile(r"^/([\w]+)/status(?:es)?/(\d+)")
+# X's lang values that aren't a language: und (unknown), zxx (no text), qme (media/links only),
+# qam (mentions only), qht (hashtags only), qct (cashtags only), qst (very short), art (emoji/symbols)
+NOT_A_LANGUAGE = {"", "und", "zxx", "qme", "qam", "qht", "qct", "qst", "art"}
+
+
+def x_status(url: str) -> tuple[str, str] | None:
+    """(user, status id) from an x.com/twitter.com post URL, or None."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    if not (matches_domain(host, "x.com") or matches_domain(host, "twitter.com")):
+        return None
+    m = X_STATUS_RE.match(parsed.path)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def needs_translation(lang: str | None) -> bool:
+    """True for a post language other than English (X's lang codes)."""
+    lang = (lang or "").lower()
+    return lang not in NOT_A_LANGUAGE and not lang.startswith("en")
+
+
+def translated_x_url(url: str, host: str) -> str | None:
+    """The post on an FxEmbed host with /en added, which makes FxEmbed translate it to English."""
+    status = x_status(url)
+    return f"https://{host}/{status[0]}/status/{status[1]}/en" if status else None
+
+
 def instagram_url(url: str) -> str:
     """The post on instagram.com itself, minus tracking params (for the "Open on Instagram" button)."""
     parsed = urllib.parse.urlparse(url)
@@ -167,3 +195,8 @@ def get_response(message:str) -> str:
 	
 	else:
 		return "Uhh, dk what you're saying, bruh."
+
+
+def clip(text: str, limit: int) -> str:
+    """text cut to at most limit characters, with "..." when cut."""
+    return text if len(text) <= limit else text[:limit - 3] + "..."
