@@ -211,6 +211,40 @@ def short_link(url: str) -> str:
     return f"`{host}{path}`"
 
 
+REACTION_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm"}
+
+
+def reaction_extension(name_or_url: str) -> str:
+    """File extension to store an uploaded reaction under (.gif when it can't tell)."""
+    ext = os.path.splitext(urllib.parse.urlparse(name_or_url).path)[1].lower()
+    return ext if ext in REACTION_EXTENSIONS else ".gif"
+
+
+def is_discord_upload(url: str) -> bool:
+    """A link to a file uploaded to Discord. These expire after about a day."""
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return host in ("cdn.discordapp.com", "media.discordapp.net") and parsed.path.startswith(("/attachments/", "/ephemeral-attachments/"))
+
+
+def fit_items(items: list[str], limit: int, sep: str = " · ") -> str:
+    """Join as many leading items as fit in limit characters, then "…and N more" for the rest."""
+    shown, used = [], 0
+    for item in items:
+        rest = len(items) - len(shown) - 1
+        tail = len(f"{sep}…and {rest} more") if rest else 0
+        cost = len(item) + (len(sep) if shown else 0)
+        if used + cost + tail > limit:
+            break
+        shown.append(item)
+        used += cost
+    text = sep.join(shown)
+    extra = len(items) - len(shown)
+    if extra:
+        text += (sep if text else "") + f"…and {extra} more"
+    return text[:limit]
+
+
 def webhook_name(name: str) -> str:
     """Discord rejects webhook usernames containing "discord" or "clyde"."""
     name = re.sub(r"discord|clyde", "", name or "", flags=re.IGNORECASE).strip()[:80]

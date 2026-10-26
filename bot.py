@@ -1,4 +1,4 @@
-import discord, os, utils, json, asyncio, time, aiohttp, io, glob
+import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -19,6 +19,12 @@ PLAIN_BUTTON_EMOJI = {
 	"instagram": "📸", "x": "✖️", "download": "⬇️",
 	"spotify": "🟢", "applemusic": "🍎", "youtubemusic": "▶️", "songlink": "🔗",
 }
+# Saved reactions (/addai): uploaded files live here (gitignored; the bots' failover syncs data/)
+REACTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "reactions")
+REACTION_MAX_BYTES = 10 * 2**20  # Discord's upload limit in a server without boosts
+REACTION_NAME_RE = re.compile(r"[\w-]{1,32}")
+REACTION_TRIGGER_RE = re.compile(r";([\w-]{1,32})(?:\s+(<@!?\d+>))?")  # ;name, optionally with one @mention
+DEAD_STATUSES = {404, 410, 451}  # gone for good (403 isn't: some sites refuse bots but work for people)
 
 
 def run_discord_bot():
@@ -41,6 +47,8 @@ def run_discord_bot():
 			cpu_temp = utils.get_cpu_temp()
 			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 			update_presence.start()
+			if not check_reactions.is_running():
+				check_reactions.start()
 			for guild in client.guilds:
 				if guild.system_channel:
 					await guild.system_channel.send("Bot is online!")
@@ -449,6 +457,8 @@ def run_discord_bot():
 				return
 
 			if not message.webhook_id and not message.author.bot and message.guild:
+				if await reaction_from_message(message):
+					return
 				await fix_links(message, user_message)
 
 			if user_message[0] == '.':
@@ -492,6 +502,7 @@ def run_discord_bot():
 		app_emojis = {}  # name -> the bot's application emoji (button logos from emojis/)
 		http = None
 		reactions = {}
+		dead_reactions = {}  # name -> what the last check got from its link (shown in /listai)
 
 		@client.event
 		async def on_presence_update(before, after):
@@ -613,50 +624,222 @@ def run_discord_bot():
 
 		tree.add_command(urlrule)
 
-		@tree.command(name="addai", description="Save a reaction link")
-		@discord.app_commands.default_permissions(manage_guild=True)
-		async def add_react(interaction: discord.Interaction, name: str, link: str):
-			nonlocal reactions
-			if not link.startswith(("http://", "https://")):
-				await interaction.response.send_message("Link must start with http:// or https://", ephemeral=True)
-				return
-			reactions[name] = link
+		# --- saved reactions: /addai, /ai, /removeai, /listai and ;name in a message ---
+
+		def save_reactions():
 			data = {}
 			try:
 				with open("config.json") as f:
-					data = json.load(f)
+					data = json.load(f)  # keep url_rules and anything else saved there
 			except (FileNotFoundError, json.JSONDecodeError):
 				pass
 			data["reactions"] = dict(reactions)
 			with open("config.json", "w") as f:
 				json.dump(data, f)
-			await interaction.response.send_message(f"✅ Reaction `{name}` added!", ephemeral=True)
+
+		def reaction_file(name: str) -> str | None:
+			"""Path of a reaction saved as an uploaded file, or None for a link."""
+			value = reactions.get(name, "")
+			return os.path.join(REACTIONS_DIR, value[5:]) if value.startswith("file:") else None
+
+		def drop_reaction_file(name: str):
+			path = reaction_file(name)
+			if path and os.path.exists(path):
+				os.remove(path)
+
+		async def link_problem(url: str) -> str | None:
+			"""What's wrong with a saved link, or None if it works or we can't tell (our network)."""
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(url, timeout=aiohttp.ClientTimeout(total=8), headers={"Range": "bytes=0-0"}) as resp:
+					return f"HTTP {resp.status}" if resp.status in DEAD_STATUSES else None
+			except Exception as e:
+				print(f"Reaction link check failed for {url}: {e.__class__.__name__}", flush=True)
+				return None
+
+		async def download_upload(url: str) -> tuple[bytes, str] | None:
+			"""(data, extension) of a Discord attachment link, or None if it expired or is too big."""
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			try:
+				async with http.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+					if resp.status != 200 or (resp.content_length or 0) > REACTION_MAX_BYTES:
+						return None
+					data = await resp.read()
+			except Exception as e:
+				print(f"Reaction download failed for {url}: {e.__class__.__name__}", flush=True)
+				return None
+			if len(data) > REACTION_MAX_BYTES:
+				return None
+			return data, utils.reaction_extension(url)
+
+		def store_reaction_file(name: str, data: bytes, ext: str):
+			drop_reaction_file(name)
+			os.makedirs(REACTIONS_DIR, exist_ok=True)
+			with open(os.path.join(REACTIONS_DIR, name + ext), "wb") as f:
+				f.write(data)
+			reactions[name] = f"file:{name}{ext}"
+			dead_reactions.pop(name, None)
+
+		async def webhook_for(channel) -> tuple[discord.Webhook, dict]:
+			"""The bot's "IG Cleaner" webhook for channel, plus the send() kwargs to post into it.
+			Webhooks belong to the parent channel; a thread is reached with thread=."""
+			parent = channel.parent if isinstance(channel, discord.Thread) else channel
+			webhook = discord.utils.get(await parent.webhooks(), name="IG Cleaner")
+			if not webhook:
+				webhook = await parent.create_webhook(name="IG Cleaner")
+			return webhook, ({"thread": channel} if isinstance(channel, discord.Thread) else {})
+
+		async def send_reaction(channel, member, name: str, target: str | None = None, reply_to=None) -> str | None:
+			"""Post a saved reaction as member. None when sent, else why not (to show the user)."""
+			value = reactions.get(name)
+			if value is None:
+				return f"No reaction named `{name}`."
+			path = reaction_file(name)
+			if path and not os.path.exists(path):
+				return f"`{name}`'s file is missing. Add it again with /addai."
+			if not path:
+				problem = await link_problem(value)
+				if problem:
+					dead_reactions[name] = problem
+					return f"`{name}`'s link is dead ({problem}). Add it again with /addai (uploading the file keeps it from dying)."
+			lines = []
+			if isinstance(reply_to, discord.Message):
+				lines.append(f"-# ↪ replying to [{reply_to.author.display_name}]({reply_to.jump_url})")
+			lines.append(" ".join(x for x in (target, None if path else value) if x))
+			webhook, kwargs = await webhook_for(channel)
+			await webhook.send(
+				"\n".join(line for line in lines if line) or discord.utils.MISSING,
+				file=discord.File(path) if path else discord.utils.MISSING,
+				username=utils.webhook_name(member.display_name),
+				avatar_url=member.display_avatar.url,
+				**kwargs,
+			)
+			return None
+
+		async def reaction_from_message(message) -> bool:
+			"""A message that's just ;name (optionally with one @mention) posts that reaction as its
+			author and is deleted. True if it was one."""
+			m = REACTION_TRIGGER_RE.fullmatch(message.content.strip())
+			if not m or message.attachments:
+				return False
+			name = {k.lower(): k for k in reactions}.get(m.group(1).lower())
+			if not name:
+				return False
+			ref = message.reference.resolved if message.reference else None
+			problem = await send_reaction(message.channel, message.author, name, m.group(2), ref)
+			if problem:
+				try:
+					await message.reply(problem, delete_after=15, mention_author=False)
+				except discord.HTTPException:
+					pass
+				return True
+			try:
+				await message.delete()
+			except discord.HTTPException:
+				pass
+			return True
+
+		@tasks.loop(hours=24)
+		async def check_reactions():
+			"""Daily: note which saved links stopped working (shown in /listai)."""
+			for name, value in list(reactions.items()):
+				if value.startswith("file:"):
+					continue
+				problem = await link_problem(value)
+				if problem:
+					dead_reactions[name] = problem
+				else:
+					dead_reactions.pop(name, None)
+			if dead_reactions:
+				print(f"Dead reaction links: {', '.join(sorted(dead_reactions))}", flush=True)
 
 		async def _autocomplete_reactions(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
 			return [
 				discord.app_commands.Choice(name=name, value=name)
-				for name in reactions if current.lower() in name.lower()
+				for name in sorted(reactions) if current.lower() in name.lower()
 			][:25]
+
+		@tree.command(name="addai", description="Save a reaction: a link, or upload the GIF/image/video itself")
+		@discord.app_commands.describe(
+			name="What to call it (letters, digits, _ and -); type ;name in a message to post it",
+			link="A link to the GIF/image (Tenor, Giphy, ...)",
+			file="Or upload it: kept by the bot, so it never stops working",
+		)
+		@discord.app_commands.default_permissions(manage_guild=True)
+		async def add_react(interaction: discord.Interaction, name: str, link: str | None = None, file: discord.Attachment | None = None):
+			if not REACTION_NAME_RE.fullmatch(name):
+				await interaction.response.send_message("Names can only have letters, digits, `_` and `-` (up to 32).", ephemeral=True)
+				return
+			if not link and not file:
+				await interaction.response.send_message("Give a link or upload a file.", ephemeral=True)
+				return
+			await interaction.response.defer(ephemeral=True)
+			if file:
+				if file.size > REACTION_MAX_BYTES:
+					await interaction.followup.send(f"That file is over {REACTION_MAX_BYTES // 2**20} MB.", ephemeral=True)
+					return
+				store_reaction_file(name, await file.read(), utils.reaction_extension(file.filename))
+				kind = "uploaded file"
+			elif not link.startswith(("http://", "https://")):
+				await interaction.followup.send("Links must start with http:// or https://", ephemeral=True)
+				return
+			elif utils.is_discord_upload(link):
+				# Discord's file links expire after about a day, so keep the file itself
+				got = await download_upload(link)
+				if not got:
+					await interaction.followup.send("That Discord file link has expired (or is over 10 MB). Upload the file instead.", ephemeral=True)
+					return
+				store_reaction_file(name, *got)
+				kind = "file (Discord links expire, so the bot keeps a copy)"
+			else:
+				problem = await link_problem(link)
+				if problem:
+					await interaction.followup.send(f"That link doesn't work ({problem}).", ephemeral=True)
+					return
+				drop_reaction_file(name)
+				reactions[name] = link
+				dead_reactions.pop(name, None)
+				kind = "link"
+			save_reactions()
+			await interaction.followup.send(f"✅ Saved `{name}` ({kind}). Post it with `/ai {name}` or by typing `;{name}`.", ephemeral=True)
+
+		@tree.command(name="removeai", description="Delete a saved reaction")
+		@discord.app_commands.autocomplete(name=_autocomplete_reactions)
+		@discord.app_commands.default_permissions(manage_guild=True)
+		async def remove_react(interaction: discord.Interaction, name: str):
+			if name not in reactions:
+				await interaction.response.send_message(f"No reaction named `{name}`.", ephemeral=True)
+				return
+			drop_reaction_file(name)
+			del reactions[name]
+			dead_reactions.pop(name, None)
+			save_reactions()
+			await interaction.response.send_message(f"🗑️ Removed `{name}`.", ephemeral=True)
+
+		@tree.command(name="listai", description="List the saved reactions")
+		async def list_reacts(interaction: discord.Interaction):
+			if not reactions:
+				await interaction.response.send_message("No reactions saved yet. Add one with /addai.", ephemeral=True)
+				return
+			# dead ones first, so they get fixed; one embed (a message's embeds share a 6000-character cap)
+			names = sorted(reactions, key=lambda n: (n not in dead_reactions, n.lower()))
+			items = [
+				f"`{name}`" + (" 📎" if reactions[name].startswith("file:") else "") + (f" ⚠️ dead ({dead_reactions[name]})" if name in dead_reactions else "")
+				for name in names
+			]
+			embed = discord.Embed(title=f"Saved reactions ({len(reactions)})", description=utils.fit_items(items, 4000), color=0x5865F2)
+			embed.set_footer(text="Post one: /ai <name> or type ;name · 📎 = uploaded file, kept by the bot")
+			await interaction.response.send_message(embed=embed, ephemeral=True)
 
 		@tree.command(name="ai", description="Send a saved reaction")
 		@discord.app_commands.autocomplete(name=_autocomplete_reactions)
 		async def react(interaction: discord.Interaction, name: str, target: discord.Member = None):
-			nonlocal reactions
-			if name not in reactions:
-				await interaction.response.send_message(f"No reaction named `{name}`", ephemeral=True)
-				return
-			link = reactions[name]
-			if target:
-				link = f"{target.mention} {link}"
-			await interaction.response.send_message("✅", ephemeral=True)
-			webhooks = await interaction.channel.webhooks()
-			webhook = discord.utils.get(webhooks, name="IG Cleaner")
-			if not webhook:
-				webhook = await interaction.channel.create_webhook(name="IG Cleaner")
-			await webhook.send(
-				link,
-				username=interaction.user.display_name,
-				avatar_url=interaction.user.display_avatar.url,
-			)
+			await interaction.response.defer(ephemeral=True)
+			problem = await send_reaction(interaction.channel, interaction.user, name, target.mention if target else None)
+			await interaction.followup.send(problem or "✅", ephemeral=True)
 
 		client.run(os.environ['BOT_TOKEN'])
