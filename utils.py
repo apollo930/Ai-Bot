@@ -359,7 +359,7 @@ def x_media_plan(tweet: dict, size_limit: int, room: int) -> list[tuple[str, lis
             )
             duration = float(video.get("duration") or 0)
             fits = [f["url"] for f in mp4s if not duration or int(f.get("bitrate") or 0) * duration / 8 * 1.1 <= size_limit]
-            plan.append(("video", fits or ([video["url"]] if video.get("url") else [])))
+            plan.append(("video", fits if mp4s else ([video["url"]] if video.get("url") else [])))
     return [(kind, urls) for kind, urls in plan if urls]
 
 
