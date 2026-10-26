@@ -10,6 +10,12 @@ A Discord bot for a personal server.
    - `GUILD_ID` — (optional) server ID for instant slash commands
 3. `uv run python3 main.py`
 
+## Tests
+
+`uv run --frozen --with pytest pytest -q` (GitHub runs the same on every push). `tests/test_utils.py`
+covers the link logic; `tests/test_bot.py` drives the commands and handlers with stand-ins for
+Discord objects, without connecting or touching the network.
+
 ## Commands
 
 | Command | Description |
