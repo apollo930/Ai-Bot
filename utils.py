@@ -71,6 +71,18 @@ def find_links(text: str, rules: list[dict]) -> list[tuple[int, int, str, dict]]
     return found
 
 
+def spoiler_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of each ||spoiler|| in text, as Discord pairs the bars: first with second,
+    third with fourth. Bars inside code spans don't count."""
+    code = [m.span() for m in CODE_RE.finditer(text)]
+    bars = [i for i in (m.start() for m in re.finditer(r"\|\|", text)) if not any(a <= i < b for a, b in code)]
+    return [(bars[i], bars[i + 1] + 2) for i in range(0, len(bars) - 1, 2)]
+
+
+def in_spoiler(text: str, pos: int) -> bool:
+    return any(a <= pos < b for a, b in spoiler_spans(text))
+
+
 def fix_url(url: str, rule: dict, host: str) -> str:
     """url moved onto fixer host, keeping only whitelisted query params.
     The whole host is swapped (www.instagram.com -> ig.example.com, not www.ig.example.com)."""

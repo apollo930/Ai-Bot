@@ -166,11 +166,12 @@ def run_discord_bot():
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
 			return None, None
 
-		async def instagram_gallery(url: str, room: int, size_limit: int):
+		async def instagram_gallery(url: str, room: int, size_limit: int, spoiler: bool = False):
 			"""For an Instagram carousel: (files, embed, total items), so the repost carries the
 			real photos and videos, in order, as a Discord gallery instead of one grid image
 			(videos play inline). Items over the upload limit are left out and counted in the
-			footer. None for single photos, reels, or when INSTAFIX_API isn't set."""
+			footer. With spoiler (the link was inside ||spoiler bars||) the files are spoilered and so
+			is the caption. None for single photos, reels, or when INSTAFIX_API isn't set."""
 			code = utils.instagram_shortcode(url)
 			if not INSTAFIX_API or not code or room <= 0:
 				return None
@@ -200,7 +201,7 @@ def run_discord_bot():
 						if len(data) > size_limit:
 							return None
 						ext = exts.get(resp.content_type, ".mp4" if video else ".jpg")
-						return discord.File(io.BytesIO(data), filename=f"{code}_{i + 1}{ext}")
+						return discord.File(io.BytesIO(data), filename=f"{code}_{i + 1}{ext}", spoiler=spoiler)
 				except Exception as e:
 					print(f"{item['type'].title()} download failed for {code}: {e.__class__.__name__}", flush=True)
 					return None
@@ -223,6 +224,8 @@ def run_discord_bot():
 				)
 			elif caption:
 				embed.description = utils.clip(caption, 300)
+			if spoiler and embed.description:
+				embed.description = f"||{embed.description}||"
 			# what isn't attached: too big to upload, failed to download, or past the 10-file cap
 			missing = [m["type"] for m, f in zip(media, got, strict=False) if not f] + [m["type"] for m in media[room:]]
 			parts = []
@@ -345,9 +348,11 @@ def run_discord_bot():
 			media = {u: kind for u, (_fixed, kind) in zip(unique, results)}
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
+			# A link inside ||spoiler bars|| gets spoilered files, or the photos would show openly.
+			spoilered = {url for start, _e, url, _r in links if utils.in_spoiler(user_message, start)}
 			gallery, gallery_url = None, None
 			for url in unique:
-				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit)
+				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit, url in spoilered)
 				if gallery:
 					gallery_url = url
 					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos/videos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
@@ -403,7 +408,7 @@ def run_discord_bot():
 				async def send():
 					files = [await a.to_file(spoiler=a.is_spoiler()) for a in message.attachments]
 					if gallery:
-						files += [discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename) for f in gallery[0]]
+						files += [discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename, spoiler=f.spoiler) for f in gallery[0]]
 						kwargs["embed"] = gallery[1]
 					return await webhook.send(transformed, view=buttons_view(), files=files, wait=True, **kwargs)
 
