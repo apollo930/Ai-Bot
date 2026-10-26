@@ -442,6 +442,7 @@ def run_discord_bot():
 				await sent.delete()
 				return True, None
 			seen_links.remember(message.guild.id, keys, sent.id, sent.jump_url, message.author.display_name)
+			repost_owners.add(sent.id, message.author.id)
 			return True, sent
 
 		@client.event
@@ -472,6 +473,7 @@ def run_discord_bot():
 		@client.event
 		async def on_raw_message_delete(payload):
 			seen_links.forget(payload.message_id)  # a deleted repost no longer counts as posted before
+			repost_owners.forget(payload.message_id)
 
 		@client.event
 		async def on_interaction(interaction: discord.Interaction):
@@ -499,6 +501,7 @@ def run_discord_bot():
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
 		seen_links = utils.SeenLinks("links.db")
+		repost_owners = utils.RepostOwners("links.db")
 		app_emojis = {}  # name -> the bot's application emoji (button logos from emojis/)
 		http = None
 		reactions = {}
@@ -552,6 +555,54 @@ def run_discord_bot():
 				lines.append(utils.short_link(url))
 				lines += [f"- {step}" for step in url_steps] or ["- nothing tried"]
 			await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
+
+		def repost_owner(message: discord.Message) -> int | None:
+			"""Who a repost of ours belongs to: recorded when it was sent, or (for reposts from before
+			that) the poster id in its Delete button."""
+			if not message.webhook_id:
+				return None
+			owner = repost_owners.owner(message.id)
+			if owner is not None:
+				return owner
+			for row in message.components:
+				for item in getattr(row, "children", []):
+					cid = getattr(item, "custom_id", None) or ""
+					if cid.startswith("dellink:"):
+						return int(cid.split(":", 1)[1])
+			return None
+
+		class EditRepost(discord.ui.Modal, title="Edit repost"):
+			def __init__(self, message: discord.Message):
+				super().__init__()
+				self.message = message
+				# a repost with files or a gallery can lose its text; one without can't
+				self.text = discord.ui.TextInput(
+					label="Message", style=discord.TextStyle.paragraph, default=message.content[:2000] or None,
+					max_length=2000, required=not (message.attachments or message.embeds),
+				)
+				self.add_item(self.text)
+
+			async def on_submit(self, interaction: discord.Interaction):
+				try:
+					webhook = await client.fetch_webhook(self.message.webhook_id)
+					thread = self.message.channel if isinstance(self.message.channel, discord.Thread) else discord.utils.MISSING
+					await webhook.edit_message(self.message.id, content=self.text.value, thread=thread)
+				except discord.HTTPException as e:
+					await interaction.response.send_message(f"Couldn't edit it: {e.text or e.status}", ephemeral=True)
+					return
+				await interaction.response.send_message("✏️ Edited.", ephemeral=True)
+
+		@tree.context_menu(name="Edit repost")
+		async def edit_repost(interaction: discord.Interaction, message: discord.Message):
+			"""Right-click a repost → Apps → Edit repost: change its text (only whoever it's posted as)."""
+			owner = repost_owner(message)
+			if owner is None:
+				await interaction.response.send_message("That isn't one of my reposts.", ephemeral=True)
+				return
+			if interaction.user.id != owner:
+				await interaction.response.send_message("Only the person it was posted as can edit it.", ephemeral=True)
+				return
+			await interaction.response.send_modal(EditRepost(message))
 
 		urlrule = discord.app_commands.Group(name="urlrule", description="Manage URL replacement rules")
 
@@ -711,13 +762,15 @@ def run_discord_bot():
 				lines.append(f"-# ↪ replying to [{reply_to.author.display_name}]({reply_to.jump_url})")
 			lines.append(" ".join(x for x in (target, None if path else value) if x))
 			webhook, kwargs = await webhook_for(channel)
-			await webhook.send(
+			sent = await webhook.send(
 				"\n".join(line for line in lines if line) or discord.utils.MISSING,
 				file=discord.File(path) if path else discord.utils.MISSING,
 				username=utils.webhook_name(member.display_name),
 				avatar_url=member.display_avatar.url,
+				wait=True,
 				**kwargs,
 			)
+			repost_owners.add(sent.id, member.id)
 			return None
 
 		async def reaction_from_message(message) -> bool:

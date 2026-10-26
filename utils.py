@@ -373,6 +373,34 @@ def link_key(url: str) -> str:
     return f"{host}{parsed.path.rstrip('/')}" + (f"?{query}" if query else "")
 
 
+class RepostOwners:
+    """Who each of the bot's webhook posts (link reposts, reactions) belongs to, so only they
+    can edit it ("Edit repost"). Same SQLite file as SeenLinks."""
+
+    KEEP = 50_000
+
+    def __init__(self, path: str):
+        self.db = sqlite3.connect(path)
+        self.db.execute("CREATE TABLE IF NOT EXISTS reposts (message_id INTEGER PRIMARY KEY, author_id INTEGER, posted_at INTEGER)")
+        self.db.commit()
+
+    def add(self, message_id: int, author_id: int):
+        self.db.execute("INSERT OR REPLACE INTO reposts VALUES (?, ?, ?)", (message_id, author_id, int(time.time())))
+        self.db.execute(
+            "DELETE FROM reposts WHERE message_id IN (SELECT message_id FROM reposts ORDER BY posted_at DESC LIMIT -1 OFFSET ?)",
+            (self.KEEP,),
+        )
+        self.db.commit()
+
+    def owner(self, message_id: int) -> int | None:
+        row = self.db.execute("SELECT author_id FROM reposts WHERE message_id = ?", (message_id,)).fetchone()
+        return row[0] if row else None
+
+    def forget(self, message_id: int):
+        self.db.execute("DELETE FROM reposts WHERE message_id = ?", (message_id,))
+        self.db.commit()
+
+
 class SeenLinks:
     """First repost of each post per server, so a later share can say "posted before" and link to it.
     Kept in SQLite next to config.json so it survives restarts and deploys."""
