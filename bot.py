@@ -1,4 +1,4 @@
-import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re
+import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re, sys, tempfile
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -24,6 +24,7 @@ REACTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
 REACTION_MAX_BYTES = 10 * 2**20  # Discord's upload limit in a server without boosts
 REACTION_NAME_RE = re.compile(r"[\w-]{1,32}")
 REACTION_TRIGGER_RE = re.compile(r";([\w-]{1,32})(?:\s+(<@!?\d+>))?")  # ;name, optionally with one @mention
+FALLBACK_TIMEOUT = 60  # seconds yt-dlp gets to fetch a post's video when no fixer embeds it
 DEAD_STATUSES = {404, 410, 451}  # gone for good (403 isn't: some sites refuse bots but work for people)
 
 
@@ -173,6 +174,42 @@ def run_discord_bot():
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
 			return None, None
+
+		async def download_video(url: str, max_bytes: int, spoiler: bool, steps: list) -> discord.File | None:
+			"""Last resort when no fixer embeds a post: fetch its video with yt-dlp (a separate process,
+			at most max_bytes and FALLBACK_TIMEOUT seconds) to attach to the repost."""
+			if max_bytes <= 0:
+				return None
+			with tempfile.TemporaryDirectory() as tmp:
+				proc = await asyncio.create_subprocess_exec(
+					sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-playlist",
+					"--max-filesize", str(max_bytes),
+					"-f", f"b[ext=mp4][filesize<{max_bytes}]/b[filesize<{max_bytes}]/b[ext=mp4]/b",
+					"-o", os.path.join(tmp, "video.%(ext)s"), "--print", "after_move:filepath", url,
+					stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+				)
+				try:
+					out, err = await asyncio.wait_for(proc.communicate(), FALLBACK_TIMEOUT)
+				except TimeoutError:
+					proc.kill()
+					await proc.wait()
+					steps.append(f"✗ download fallback: timed out ({FALLBACK_TIMEOUT}s)")
+					return None
+				lines = out.decode(errors="replace").strip().splitlines()
+				path = lines[-1] if lines else ""
+				if proc.returncode != 0 or not path or not os.path.isfile(path):
+					why = (err.decode(errors="replace").strip().splitlines() or ["no video, or over the upload limit"])[-1]
+					steps.append(f"✗ download fallback: {utils.clip(why.removeprefix('ERROR: '), 150)}")
+					return None
+				size = os.path.getsize(path)
+				if size > max_bytes:
+					steps.append("✗ download fallback: the video is over this server's upload limit")
+					return None
+				with open(path, "rb") as f:
+					data = f.read()
+			steps.append(f"📥 no fixer worked, so the video was downloaded and attached ({size / 2**20:.1f} MB, yt-dlp)")
+			name = utils.link_key(url).replace(":", "_").replace("/", "_")[:60]
+			return discord.File(io.BytesIO(data), filename=f"{name}{os.path.splitext(path)[1]}", spoiler=spoiler)
 
 		async def instagram_gallery(url: str, room: int, size_limit: int, spoiler: bool = False):
 			"""For an Instagram carousel: (files, embed, total items), so the repost carries the
@@ -368,6 +405,16 @@ def run_discord_bot():
 					# Discord previewing it, and it shows our InstaFix address like every other repost
 					chosen[url] = f"<{utils.fix_url(url, {}, utils.host_of(INSTAFIX_API))}>"
 					break
+			# Last resort for a post no fixer could embed: attach its video (one per message, to stay quick).
+			# The link is then kept from embedding, since all it would show is a login page or an error.
+			room = limit - sum(a.size for a in message.attachments)
+			fallback = None
+			for url in unique:
+				if url not in chosen and not gallery:
+					fallback = await download_video(url, room, url in spoilered, steps[url])
+					if fallback:
+						chosen[url] = f"<{url}>"
+						break
 			if not chosen and not song_buttons:
 				return False, None  # no fixer works right now: leave the original alone
 			transformed = utils.rewrite_links(user_message, links, chosen)
@@ -418,6 +465,8 @@ def run_discord_bot():
 					if gallery:
 						files += [discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename, spoiler=f.spoiler) for f in gallery[0]]
 						kwargs["embed"] = gallery[1]
+					if fallback:
+						files.append(discord.File(io.BytesIO(fallback.fp.getvalue()), filename=fallback.filename, spoiler=fallback.spoiler))
 					return await webhook.send(transformed, view=buttons_view(), files=files, wait=True, **kwargs)
 
 				try:

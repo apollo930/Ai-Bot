@@ -249,3 +249,59 @@ def test_edit_repost(bot, monkeypatch):
         assert hook.edits[-1][1]["thread"] is thread
 
     run(flow())
+
+
+class FakeYtDlp:
+    """Stands in for the yt-dlp process: writes a video of `size` bytes where -o points and
+    prints its path, or fails with `error`."""
+
+    def __init__(self, size=1000, error=None):
+        self.size, self.error, self.args = size, error, None
+
+    async def __call__(self, *args, **kw):
+        self.args = args
+        out = args[args.index("-o") + 1]
+        returncode, stdout, stderr = 0, b"", b""
+        if self.error:
+            returncode, stderr = 1, f"ERROR: {self.error}".encode()
+        else:
+            path = out.replace("%(ext)s", "mp4")
+            with open(path, "wb") as f:
+                f.write(b"\0" * self.size)
+            stdout = path.encode() + b"\n"
+
+        class Proc:
+            async def communicate(self):
+                return stdout, stderr
+
+            def kill(self):
+                pass
+
+        proc = Proc()
+        proc.returncode = returncode
+        return proc
+
+
+def test_download_fallback(bot, monkeypatch):
+    import bot as bot_module
+
+    fake = FakeYtDlp(size=2048)
+    monkeypatch.setattr(bot_module.asyncio, "create_subprocess_exec", fake)
+    steps = []
+    f = run(bot["download_video"]("https://x.com/u/status/5", 10_000, True, steps))
+    assert f.filename == "SPOILER_x_5.mp4" and f.spoiler and len(f.fp.getvalue()) == 2048
+    assert "--max-filesize" in fake.args and fake.args[fake.args.index("--max-filesize") + 1] == "10000"
+    assert steps[-1].startswith("📥")
+
+    monkeypatch.setattr(bot_module.asyncio, "create_subprocess_exec", FakeYtDlp(error="[twitter] 5: No video could be found in this tweet"))
+    steps = []
+    assert run(bot["download_video"]("https://x.com/u/status/5", 10_000, False, steps)) is None
+    assert steps[-1] == "✗ download fallback: [twitter] 5: No video could be found in this tweet"
+
+    monkeypatch.setattr(bot_module.asyncio, "create_subprocess_exec", FakeYtDlp(size=20_000))
+    steps = []
+    assert run(bot["download_video"]("https://x.com/u/status/5", 10_000, False, steps)) is None
+    assert "over this server's upload limit" in steps[-1]
+
+    steps = []
+    assert run(bot["download_video"]("https://x.com/u/status/5", 0, False, steps)) is None and steps == []  # no room left
