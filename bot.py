@@ -351,8 +351,9 @@ def run_discord_bot():
 				if gallery:
 					gallery_url = url
 					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos/videos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
-					# the photos are attached, so the link itself shouldn't embed a grid too
-					chosen[url] = f"<{utils.instagram_url(url)}>"
+					# the photos are attached, so the link itself shouldn't embed a grid too: <> stops
+					# Discord previewing it, and it shows our InstaFix address like every other repost
+					chosen[url] = f"<{utils.fix_url(url, {}, utils.host_of(INSTAFIX_API))}>"
 					break
 			if not chosen and not song_buttons:
 				return False, None  # no fixer works right now: leave the original alone
