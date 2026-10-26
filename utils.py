@@ -293,9 +293,11 @@ def meta_content(html: str, key: str) -> str | None:
     return None
 
 
-def download_link(url: str, media: str | None, x_host: str, instafix: str) -> str | None:
+def download_link(url: str, media: str | None, x_host: str, instafix: str, via: str | None = None) -> str | None:
     """Link that opens the post's media file itself (best quality), for the Download button.
-    Both fixers resolve it fresh on every click, so the button keeps working after CDN links expire."""
+    Both fixers resolve it fresh on every click, so the button keeps working after CDN links expire.
+    via is the fixer link the repost uses: an Instagram post gets InstaFix's download only when
+    InstaFix is what embedded it (when it fell back to another fixer, InstaFix can't get it)."""
     if media not in ("video", "image"):
         return None
     status = x_status(url)
@@ -303,7 +305,7 @@ def download_link(url: str, media: str | None, x_host: str, instafix: str) -> st
         # FxEmbed sends /status/<id>.mp4 to the post's first video or photo, whichever it has
         return f"https://{x_host}/{status[0]}/status/{status[1]}.mp4"
     code = instagram_shortcode(url)
-    if code and instafix:
+    if code and instafix and (via is None or host_of(via) == host_of(instafix)):
         return f"{instafix}/{'videos' if media == 'video' else 'images'}/{code}/1"
     return None
 

@@ -96,15 +96,20 @@ def run_discord_bot():
 		def button_emoji(kind: str):
 			return app_emojis.get(f"btn_{kind}") or PLAIN_BUTTON_EMOJI[kind]
 
-		async def embed_problem(url: str, page: dict | None = None) -> str | None:
+		async def embed_problem(url: str, page: dict | None = None, origin: str | None = None) -> str | None:
 			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
 			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)
-			and what media the post has ("video", "image" or None, for the Download button)."""
+			and what media the post has ("video", "image" or None, for the Download button).
+			origin is the site the link came from (the rule's domain)."""
 			nonlocal http
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
 			try:
 				async with http.get(url, timeout=aiohttp.ClientTimeout(total=10), max_redirects=5) as resp:
+					# A fixer that can't get the post often redirects to the post itself. Instagram then
+					# serves its login page, whose og:image would pass the media check below.
+					if origin and resp.url.host and utils.matches_domain(resp.url.host, origin):
+						return f"sent back to {resp.url.host} (it couldn't get the post)"
 					if resp.status != 200:
 						return f"HTTP {resp.status}"
 					# kkinstagram-style fixers redirect Discordbot straight to the media file
@@ -141,14 +146,14 @@ def run_discord_bot():
 				# there first. FxEmbed fixers (fixupx, ours) state the post's language in their page.
 				first = candidates[0][1]
 				pages[first] = {}
-				checked[first] = await embed_problem(first, pages[first])
+				checked[first] = await embed_problem(first, pages[first], rule.get("domain"))
 				lang = pages[first].get("lang")
 				if utils.needs_translation(lang):
 					candidates.insert(0, (FXEMBED_HOST, utils.translated_x_url(url, FXEMBED_HOST), f", translated from `{lang}`"))
 			for host, candidate, note in candidates:
 				if candidate not in checked:
 					pages[candidate] = {}
-					checked[candidate] = await embed_problem(candidate, pages[candidate])
+					checked[candidate] = await embed_problem(candidate, pages[candidate], rule.get("domain"))
 				problem = checked[candidate]
 				if problem is None:
 					steps.append(f"✓ `{host}`: used{note}")
@@ -372,7 +377,7 @@ def run_discord_bot():
 						label = f"All {gallery[2]}" if url == gallery_url and gallery[2] > len(gallery[0]) else None
 						view.add_item(discord.ui.Button(label=label, emoji=button_emoji(site), url=link))
 						# the photos of a gallery are attached already, so it doesn't get a Download button
-						download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API)
+						download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API, chosen.get(url))
 						if download:
 							view.add_item(discord.ui.Button(emoji=button_emoji("download"), url=download))
 					for buttons in song_buttons.values():
