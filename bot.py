@@ -167,9 +167,10 @@ def run_discord_bot():
 			return None, None
 
 		async def instagram_gallery(url: str, room: int, size_limit: int):
-			"""For a multi-photo Instagram post: (files, embed, total photos), so the
-			repost carries the real photos as a Discord gallery instead of one grid image.
-			None for single photos, reels, or when INSTAFIX_API isn't set."""
+			"""For an Instagram carousel: (files, embed, total items), so the repost carries the
+			real photos and videos, in order, as a Discord gallery instead of one grid image
+			(videos play inline). Items over the upload limit are left out and counted in the
+			footer. None for single photos, reels, or when INSTAFIX_API isn't set."""
 			code = utils.instagram_shortcode(url)
 			if not INSTAFIX_API or not code or room <= 0:
 				return None
@@ -184,26 +185,28 @@ def run_discord_bot():
 			except Exception as e:
 				print(f"InstaFix API failed for {code}: {e.__class__.__name__}", flush=True)
 				return None
-			media = post.get("media") or []
-			photos = [m["url"] for m in media if m.get("type") == "image"]
-			if len(media) < 2 or not photos:
+			media = [m for m in post.get("media") or [] if m.get("type") in ("image", "video") and m.get("url")]
+			if len(media) < 2:
 				return None
+			exts = {"image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"}
 
-			async def download(i, photo_url):
+			async def download(i, item):
+				video = item["type"] == "video"
 				try:
-					async with http.get(photo_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+					async with http.get(item["url"], timeout=aiohttp.ClientTimeout(total=40 if video else 20)) as resp:
 						if resp.status != 200 or (resp.content_length or 0) > size_limit:
 							return None
 						data = await resp.read()
 						if len(data) > size_limit:
 							return None
-						ext = ".png" if resp.content_type == "image/png" else ".webp" if resp.content_type == "image/webp" else ".jpg"
+						ext = exts.get(resp.content_type, ".mp4" if video else ".jpg")
 						return discord.File(io.BytesIO(data), filename=f"{code}_{i + 1}{ext}")
 				except Exception as e:
-					print(f"Photo download failed for {code}: {e.__class__.__name__}", flush=True)
+					print(f"{item['type'].title()} download failed for {code}: {e.__class__.__name__}", flush=True)
 					return None
 
-			files = [f for f in await asyncio.gather(*(download(i, u) for i, u in enumerate(photos[:room]))) if f]
+			got = await asyncio.gather(*(download(i, m) for i, m in enumerate(media[:room])))
+			files = [f for f in got if f]
 			if not files:
 				return None
 			embed = discord.Embed(url=utils.instagram_url(url), color=0xE1306C)
@@ -220,10 +223,16 @@ def run_discord_bot():
 				)
 			elif caption:
 				embed.description = utils.clip(caption, 300)
-			videos = len(media) - len(photos)
-			if videos:
-				embed.set_footer(text=f"+ {videos} video{'s' if videos > 1 else ''} on Instagram")
-			return files, embed, len(photos)
+			# what isn't attached: too big to upload, failed to download, or past the 10-file cap
+			missing = [m["type"] for m, f in zip(media, got, strict=False) if not f] + [m["type"] for m in media[room:]]
+			parts = []
+			for kind, word in (("image", "photo"), ("video", "video")):
+				n = missing.count(kind)
+				if n:
+					parts.append(f"{n} {word}{'s' if n > 1 else ''}")
+			if parts:
+				embed.set_footer(text=f"+ {' and '.join(parts)} on Instagram")
+			return files, embed, len(media)
 
 		async def get_json(endpoint: str, params: dict):
 			"""GET endpoint?params and parse JSON (whatever its content type), or None."""
@@ -341,7 +350,7 @@ def run_discord_bot():
 				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit)
 				if gallery:
 					gallery_url = url
-					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
+					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos/videos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
 					# the photos are attached, so the link itself shouldn't embed a grid too
 					chosen[url] = f"<{utils.instagram_url(url)}>"
 					break

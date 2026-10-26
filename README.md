@@ -22,7 +22,7 @@ A Discord bot for a personal server.
 
 ### Link reposts
 
-- Multi-photo Instagram posts are reposted with the photos attached (up to 10, as a Discord gallery) using the media API of the InstaFix instance at `ig.reaper113.xyz` (`INSTAFIX_API` in `bot.py`).
+- Instagram carousels are reposted with their photos and videos attached in order (up to 10, as a Discord gallery; videos play inline, anything over the server's upload limit is counted in the footer instead) using the media API of the InstaFix instance at `ig.reaper113.xyz` (`INSTAFIX_API` in `bot.py`).
 - Buttons on reposts are emoji-only: brand logos from `emojis/` (uploaded on startup as the bot's own application emojis; plain emojis until then), and a red 🗑️ Delete. Instagram and X links get a logo button that opens the post. Posts with a video or photo also get a download button, which opens the original file. Galleries don't get one, because their photos are already attached.
 - Non-English X posts go to `x.reaper113.xyz` with `/en`, which translates them. Instagram captions are translated by `ig.reaper113.xyz` itself.
 - When a post was already shared in the server, the repost says "🔁 posted before by …", linking to that first repost. The link is masked (`[text](<url>)`) so Discord doesn't preview the old message. This history is kept in `links.db` next to `config.json`. Deleting the first repost removes it from the history.
