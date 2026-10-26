@@ -160,3 +160,22 @@ def test_seen_links_and_repost_owners(tmp_path):
     for mid in range(10):
         owners.add(mid, 1)
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM reposts").fetchone()[0] == 3
+
+
+def test_x_media_plan_picks_videos_that_fit():
+    tweet = {"media": {
+        "all": [{"type": "video", "url": "v"}, {"type": "photo", "url": "p.jpg"}, {"type": "photo", "url": "q.jpg"}],
+        "videos": [{"url": "v", "duration": 10, "formats": [
+            {"url": "hls", "container": "m3u8"},
+            {"url": "360p", "container": "mp4", "bitrate": "800000"},
+            {"url": "1080p", "container": "mp4", "bitrate": "10000000"},
+            {"url": "720p", "container": "mp4", "bitrate": "2000000"},
+        ]}],
+    }}
+    # 10 s at 10 Mbit/s is about 12.5 MB, too big for 10 MB; 720p (~2.5 MB) fits
+    assert utils.x_media_plan(tweet, 10 * 2**20, 10) == [("video", ["720p", "360p"]), ("image", ["p.jpg"]), ("image", ["q.jpg"])]
+    assert utils.x_media_plan(tweet, 10 * 2**20, 1) == [("video", ["720p", "360p"])]
+    assert utils.x_media_plan(tweet, 100_000, 10)[0] == ("image", ["p.jpg"])  # no MP4 fits: video left out
+    no_duration = {"media": {"all": [{"type": "gif", "url": "g"}], "videos": [{"url": "g", "formats": [{"url": "a", "container": "mp4", "bitrate": "1"}, {"url": "b", "container": "mp4", "bitrate": "9"}]}]}}
+    assert utils.x_media_plan(no_duration, 10, 10) == [("video", ["b", "a"])]
+    assert utils.x_media_plan({}, 10, 10) == []

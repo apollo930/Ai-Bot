@@ -211,12 +211,59 @@ def run_discord_bot():
 			name = utils.link_key(url).replace(":", "_").replace("/", "_")[:60]
 			return discord.File(io.BytesIO(data), filename=f"{name}{os.path.splitext(path)[1]}", spoiler=spoiler)
 
+		async def fetch_file(urls: list[str], size_limit: int, filename: str, spoiler: bool) -> discord.File | None:
+			"""The first of urls that downloads within size_limit, as a file named filename + its extension."""
+			nonlocal http
+			if http is None or http.closed:
+				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
+			for url in urls:
+				try:
+					async with http.get(url, timeout=aiohttp.ClientTimeout(total=40)) as resp:
+						if resp.status != 200 or (resp.content_length or 0) > size_limit:
+							continue
+						data = await resp.read()
+						if len(data) > size_limit:
+							continue
+						ext = {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif", "video/mp4": ".mp4"}.get(resp.content_type, ".mp4" if "video" in resp.content_type else ".jpg")
+						return discord.File(io.BytesIO(data), filename=f"{filename}{ext}", spoiler=spoiler)
+				except Exception as e:
+					print(f"Download failed for {url}: {e.__class__.__name__}", flush=True)
+			return None
+
+		async def x_media(url: str, room: int, size_limit: int):
+			"""For an X link inside spoiler bars (Discord doesn't preview those): (files, embed, total)
+			with the post's photos and videos from our FxEmbed's API, spoilered, so they can be
+			revealed with a click. Each video is the best MP4 that fits the upload limit. None if
+			it's not an X post, has no media, or nothing could be fetched."""
+			status = utils.x_status(url)
+			if not status or room <= 0:
+				return None
+			tweet = ((await get_json(f"{FXEMBED_API}/status/{status[1]}", {})) or {}).get("tweet") or {}
+			plan = utils.x_media_plan(tweet, size_limit, room)
+			if not plan:
+				return None
+			got = await asyncio.gather(*(fetch_file(urls, size_limit, f"x_{status[1]}_{i + 1}", True) for i, (_kind, urls) in enumerate(plan)))
+			files = [f for f in got if f]
+			if not files:
+				return None
+			author = tweet.get("author") or {}
+			embed = discord.Embed(url=f"https://x.com/{status[0]}/status/{status[1]}", color=0x000000)
+			if author.get("screen_name"):
+				embed.set_author(name=f"{author.get('name') or author['screen_name']} (@{author['screen_name']})", url=f"https://x.com/{author['screen_name']}")
+			if tweet.get("text"):
+				embed.description = f"||{utils.clip(tweet['text'], 300)}||"
+			total = len((tweet.get("media") or {}).get("all") or [])
+			if total > len(files):
+				embed.set_footer(text=f"+ {total - len(files)} more on X")
+			return files, embed, total
+
 		async def instagram_gallery(url: str, room: int, size_limit: int, spoiler: bool = False):
 			"""For an Instagram carousel: (files, embed, total items), so the repost carries the
 			real photos and videos, in order, as a Discord gallery instead of one grid image
 			(videos play inline). Items over the upload limit are left out and counted in the
 			footer. With spoiler (the link was inside ||spoiler bars||) the files are spoilered and so
-			is the caption. None for single photos, reels, or when INSTAFIX_API isn't set."""
+			is the caption, and single posts get this too (Discord doesn't preview a spoilered link).
+			None for single photos and reels otherwise, or when INSTAFIX_API isn't set."""
 			code = utils.instagram_shortcode(url)
 			if not INSTAFIX_API or not code or room <= 0:
 				return None
@@ -232,7 +279,8 @@ def run_discord_bot():
 				print(f"InstaFix API failed for {code}: {e.__class__.__name__}", flush=True)
 				return None
 			media = [m for m in post.get("media") or [] if m.get("type") in ("image", "video") and m.get("url")]
-			if len(media) < 2:
+			# single posts too when spoilered: Discord doesn't preview a link inside spoiler bars
+			if len(media) < (1 if spoiler else 2):
 				return None
 			exts = {"image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"}
 
@@ -395,25 +443,32 @@ def run_discord_bot():
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
 			# A link inside ||spoiler bars|| gets spoilered files, or the photos would show openly.
 			spoilered = {url for start, _e, url, _r in links if utils.in_spoiler(user_message, start)}
+			# Discord doesn't preview a link inside spoiler bars, so a spoilered post's media is attached
+			# (spoilered) for any Instagram or X post, not just carousels.
 			gallery, gallery_url = None, None
 			for url in unique:
+				source = INSTAFIX_API
 				gallery = await instagram_gallery(url, 10 - len(message.attachments), limit, url in spoilered)
+				if not gallery and url in spoilered:
+					source = FXEMBED_API
+					gallery = await x_media(url, 10 - len(message.attachments), limit)
 				if gallery:
 					gallery_url = url
-					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos/videos as a gallery (via `{utils.host_of(INSTAFIX_API)}`)")
-					# the photos are attached, so the link itself shouldn't embed a grid too: <> stops
-					# Discord previewing it, and it shows our InstaFix address like every other repost
-					chosen[url] = f"<{utils.fix_url(url, {}, utils.host_of(INSTAFIX_API))}>"
+					steps[url].append(f"📷 attached {len(gallery[0])} of {gallery[2]} photos/videos (via `{utils.host_of(source)}`)")
+					# the media is attached, so the link itself shouldn't embed too: <> stops Discord
+					# previewing it, and it shows our fixer's address like every other repost
+					chosen[url] = f"<{utils.fix_url(url, {}, utils.host_of(INSTAFIX_API))}>" if source == INSTAFIX_API else f"<{chosen.get(url, url)}>"
 					break
 			# Last resort for a post no fixer could embed: attach its video (one per message, to stay quick).
 			# The link is then kept from embedding, since all it would show is a login page or an error.
 			room = limit - sum(a.size for a in message.attachments)
 			fallback = None
 			for url in unique:
-				if url not in chosen and not gallery:
+				# also for a spoilered link no gallery covered: its preview wouldn't show anyway
+				if not gallery and (url not in chosen or url in spoilered):
 					fallback = await download_video(url, room, url in spoilered, steps[url])
 					if fallback:
-						chosen[url] = f"<{url}>"
+						chosen[url] = f"<{chosen.get(url, url)}>"
 						break
 			if not chosen and not song_buttons:
 				return False, None  # no fixer works right now: leave the original alone
@@ -544,6 +599,7 @@ def run_discord_bot():
 		INSTAFIX_API = "https://ig.reaper113.xyz"
 		# Our FxEmbed instance: it translates non-English posts (link + /en) through the translator on the same server
 		FXEMBED_HOST = "x.reaper113.xyz"
+		FXEMBED_API = "https://xapi.reaper113.xyz"  # its JSON API: a post's photos and videos, for spoilered X links
 		APPLE_COUNTRY = "IN"  # Apple Music store the "Apple Music" button links into
 		game_log_channel = None
 		url_rules = []

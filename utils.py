@@ -339,6 +339,30 @@ def meta_content(html: str, key: str) -> str | None:
     return None
 
 
+def x_media_plan(tweet: dict, size_limit: int, room: int) -> list[tuple[str, list[str]]]:
+    """[(kind, candidate URLs best first)] for a post's photos and videos, from FxEmbed's API
+    ("tweet"), at most room of them. A video's candidates are its MP4s that should fit
+    size_limit (estimated from bitrate and duration), best first; all its MP4s when the
+    duration is unknown, and its main URL when it lists none."""
+    media = tweet.get("media") or {}
+    videos = {v.get("url"): v for v in media.get("videos") or []}
+    plan = []
+    for item in (media.get("all") or [])[:room]:
+        if item.get("type") == "photo" and item.get("url"):
+            plan.append(("image", [item["url"]]))
+        elif item.get("type") in ("video", "gif"):
+            video = videos.get(item.get("url")) or item
+            mp4s = sorted(
+                (f for f in video.get("formats") or video.get("variants") or [] if f.get("container") == "mp4" and f.get("url")),
+                key=lambda f: int(f.get("bitrate") or 0),
+                reverse=True,
+            )
+            duration = float(video.get("duration") or 0)
+            fits = [f["url"] for f in mp4s if not duration or int(f.get("bitrate") or 0) * duration / 8 * 1.1 <= size_limit]
+            plan.append(("video", fits or ([video["url"]] if video.get("url") else [])))
+    return [(kind, urls) for kind, urls in plan if urls]
+
+
 def download_link(url: str, media: str | None, x_host: str, instafix: str, via: str | None = None) -> str | None:
     """Link that opens the post's media file itself (best quality), for the Download button.
     Both fixers resolve it fresh on every click, so the button keeps working after CDN links expire.

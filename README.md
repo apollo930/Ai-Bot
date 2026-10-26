@@ -33,6 +33,7 @@ Discord objects, without connecting or touching the network.
 
 ### Link reposts
 
+- Discord doesn't preview links inside spoiler bars, so a spoilered Instagram or X link gets the post's photos and videos attached as spoilers instead (click to reveal), with the caption spoilered too. X videos use the best quality that fits the upload limit (via our FxEmbed's API, `FXEMBED_API`).
 - Instagram carousels are reposted with their photos and videos attached in order (up to 10, as a Discord gallery; videos play inline, anything over the server's upload limit is counted in the footer instead) using the media API of the InstaFix instance at `ig.reaper113.xyz` (`INSTAFIX_API` in `bot.py`).
 - Buttons on reposts are emoji-only: brand logos from `emojis/` (uploaded on startup as the bot's own application emojis; plain emojis until then), and a red 🗑️ Delete. Instagram and X links get a logo button that opens the post. Posts with a video or photo also get a download button, which opens the original file. Galleries don't get one, because their photos are already attached.
 - Non-English X posts go to `x.reaper113.xyz` with `/en`, which translates them. Instagram captions are translated by `ig.reaper113.xyz` itself.
