@@ -105,6 +105,16 @@ def run_discord_bot():
 		def button_emoji(kind: str):
 			return app_emojis.get(f"btn_{kind}") or PLAIN_BUTTON_EMOJI[kind]
 
+		async def read_page(resp, limit: int = 256 * 1024) -> str:
+			"""The first `limit` bytes of a page. resp.content.read(n) only returns what has arrived
+			so far, and some sites (vxreddit) send the page in pieces, so this reads on until the limit."""
+			body = bytearray()
+			async for chunk in resp.content.iter_chunked(64 * 1024):
+				body += chunk
+				if len(body) >= limit:
+					break
+			return bytes(body[:limit]).decode("utf-8", errors="replace")
+
 		async def embed_problem(url: str, page: dict | None = None, origin: str | None = None) -> str | None:
 			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
 			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)
@@ -128,10 +138,14 @@ def run_discord_bot():
 						return None
 					if "html" not in resp.content_type:
 						return f"answered with {resp.content_type}"
-					html = (await resp.content.read(256 * 1024)).decode("utf-8", errors="replace")
+					html = await read_page(resp)
+					error = utils.fixer_error(html)
+					if error:
+						return f"it couldn't get the post ({utils.clip(error, 80)})"
 					if page is not None:
 						page["lang"] = utils.page_lang(html)
 						page["media"] = utils.page_media(html)
+						page["images"] = utils.page_images(html)
 					if utils.has_embed_media(html):
 						return None
 					return "no image/video in its page (post not found or blocked)"
@@ -143,11 +157,21 @@ def run_discord_bot():
 
 		async def resolve(url: str, rule: dict, steps: list) -> tuple[str | None, str | None]:
 			"""(first fixer URL for url that embeds, its media kind), trying the rule's hosts in order.
-			Each attempt goes into steps, for "Apps → Embed details"."""
+			(None, utils.KEEP_ORIGINAL) when the original link's own embed is the better one for this
+			post (see utils.FIXER_ONLY_FOR). Each attempt goes into steps, for "Apps → Embed details"."""
 			hit = fixed_cache.get(url)
 			if hit and time.time() - hit[0] < 600:
-				steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
+				if hit[1] is None:
+					steps.append("✓ kept the original link: decided for this link in the last 10 min")
+				else:
+					steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
 				return hit[1], hit[2]
+			only = utils.fixer_only_for(rule)
+
+			def remember(fixed, media):
+				if len(fixed_cache) > 500:
+					fixed_cache.clear()
+				fixed_cache[url] = (time.time(), fixed, media)
 			candidates = [(host, utils.fix_url(url, rule, host), "") for host in utils.rule_hosts(rule)]
 			checked, pages = {}, {}
 			if utils.x_status(url) and candidates:
@@ -164,15 +188,24 @@ def run_discord_bot():
 					pages[candidate] = {}
 					checked[candidate] = await embed_problem(candidate, pages[candidate], rule.get("domain"))
 				problem = checked[candidate]
+				# a page that loaded but shows no media is a text post on vxreddit, not a failure
+				if only is not None and (problem is None or "media" in pages[candidate]):
+					kind = utils.post_kind(pages[candidate].get("media"), pages[candidate].get("images", 0))
+					if kind not in only:
+						steps.append(f"✓ kept the original link: its own embed is better for this {kind or 'text/link'} post (`{host}` is only used for {' and '.join(sorted(only))})")
+						remember(None, utils.KEEP_ORIGINAL)
+						return None, utils.KEEP_ORIGINAL
 				if problem is None:
 					steps.append(f"✓ `{host}`: used{note}")
 					media = pages[candidate].get("media")
-					if len(fixed_cache) > 500:
-						fixed_cache.clear()
-					fixed_cache[url] = (time.time(), candidate, media)
+					remember(candidate, media)
 					return candidate, media
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
+			if only is not None:
+				# the site's own embed still works (a card at least), so the link stays as it is
+				steps.append("✓ kept the original link: its own embed works without a fixer")
+				return None, utils.KEEP_ORIGINAL
 			return None, None
 
 		async def download_video(url: str, max_bytes: int, spoiler: bool, steps: list) -> discord.File | None:
@@ -361,7 +394,7 @@ def run_discord_bot():
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
 			try:
 				async with http.get(f"https://open.spotify.com/track/{sid}", timeout=aiohttp.ClientTimeout(total=8)) as resp:
-					html = (await resp.content.read(256 * 1024)).decode("utf-8", errors="replace") if resp.status == 200 else ""
+					html = await read_page(resp) if resp.status == 200 else ""
 			except Exception as e:
 				print(f"Spotify page failed for {sid}: {e.__class__.__name__}", flush=True)
 				return None
@@ -439,6 +472,8 @@ def run_discord_bot():
 			song_buttons = {u: b for u, b in zip(music, songs) if b}
 			chosen = {u: fixed for u, (fixed, _media) in zip(unique, results) if fixed}
 			media = {u: kind for u, (_fixed, kind) in zip(unique, results)}
+			# links whose own embed is the better one (Reddit text, link and photo posts) stay as they are
+			kept = {u for u, kind in media.items() if kind == utils.KEEP_ORIGINAL}
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).
 			# A link inside ||spoiler bars|| gets spoilered files, or the photos would show openly.
@@ -465,13 +500,14 @@ def run_discord_bot():
 			fallback = None
 			for url in unique:
 				# also for a spoilered link no gallery covered: its preview wouldn't show anyway
-				if not gallery and (url not in chosen or url in spoilered):
+				if not gallery and url not in kept and (url not in chosen or url in spoilered):
 					fallback = await download_video(url, room, url in spoilered, steps[url])
 					if fallback:
 						chosen[url] = f"<{chosen.get(url, url)}>"
 						break
 			if not chosen and not song_buttons:
-				return False, None  # no fixer works right now: leave the original alone
+				# nothing to change: every link keeps its own embed (no ❌), or no fixer works right now
+				return len(kept) == len(unique), None
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			# 🔁 for posts someone already shared here, linking to that first repost
 			keys = {utils.link_key(u) for u in [*chosen, *song_buttons]}

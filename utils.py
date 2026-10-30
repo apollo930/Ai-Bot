@@ -157,6 +157,47 @@ def page_media(html: str) -> str | None:
     return "video" if card == "player" else "image" if card == "summary_large_image" else None
 
 
+def page_images(html: str) -> int:
+    """How many og:image tags a fixer page has (vxreddit lists every photo of a gallery)."""
+    count = 0
+    for tag in META_RE.findall(html or ""):
+        attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(tag)}
+        if (attrs.get("property") or attrs.get("name") or "").lower() == "og:image" and (attrs.get("content") or "").strip():
+            count += 1
+    return count
+
+
+def fixer_error(html: str) -> str | None:
+    """The error a fixer page reports instead of a post, e.g. vxreddit's
+    "Internal server error: HTTPError: HTTP Error 403: Forbidden" when Reddit blocks it."""
+    description = meta_content(html, "og:description") or ""
+    return description if description.startswith("Internal server error") else None
+
+
+def post_kind(media: str | None, images: int) -> str | None:
+    """"video", "gallery", "image" or None (text/link post) from what a fixer page shows."""
+    if media == "video":
+        return "video"
+    if images >= 2:
+        return "gallery"
+    return media
+
+
+# Sites whose own Discord embed beats the fixer's, except for some kinds of post.
+# Reddit's own embed is a card Reddit draws (subreddit, title, votes, comments): the best
+# look for text, link and single-image posts. But its videos don't play and a gallery
+# shows only its first photo, so those go through the fixer (vxreddit: playable video
+# with sound, up to 4 photos). Everything else keeps the original link.
+FIXER_ONLY_FOR = {"reddit.com": {"video", "gallery"}}
+KEEP_ORIGINAL = "original"
+
+
+def fixer_only_for(rule: dict) -> set[str] | None:
+    """The kinds of post a rule's fixer is used for, or None when it's used for every post."""
+    domain = (rule.get("domain") or "").lower().removeprefix("www.")
+    return FIXER_ONLY_FOR.get(domain)
+
+
 def x_status(url: str) -> tuple[str, str] | None:
     """(user, status id) from an x.com/twitter.com post URL, or None."""
     parsed = urllib.parse.urlparse(url)
