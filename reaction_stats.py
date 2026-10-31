@@ -1,6 +1,7 @@
 """Persistent counts of reactions received, plus reconciliation with Discord history."""
 
 import asyncio
+import datetime
 import logging
 import re
 import sqlite3
@@ -9,6 +10,11 @@ import time
 import discord
 
 log = logging.getLogger(__name__)
+
+# After a restart or reconnect, messages from this long before the bot was last seen alive are
+# rechecked too: reactions keep coming in on recent messages, and the last heartbeat is up to a
+# minute old. Older messages are left to a manual /reactionscan.
+CATCHUP_MARGIN = 2 * 3600
 
 
 def parse_scan_limit(value):
@@ -21,6 +27,12 @@ def parse_scan_limit(value):
     if limit > 2**63 - 1:
         raise ValueError("For all history, use inf instead of a very large number.")
     return limit
+
+
+def same_emoji(key):
+    """An emoji key without U+FE0F (the "show as emoji" mark), for matching what people type:
+    ❤ and ❤️ look alike, and keyboards differ on which one they send."""
+    return key.replace("\ufe0f", "")
 
 
 def emoji_key(emoji):
@@ -56,6 +68,10 @@ class ReactionStore:
                 guild_id INTEGER PRIMARY KEY,
                 finished_at INTEGER NOT NULL,
                 problems INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reaction_alive (
+                guild_id INTEGER PRIMARY KEY,
+                seen_at INTEGER NOT NULL
             );
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(reaction_scans)")}
@@ -116,8 +132,8 @@ class ReactionStore:
         where = "WHERE m.guild_id = ?"
         args = [guild_id]
         if emoji is not None:
-            where += " AND e.emoji_key = ?"
-            args.append(emoji_key(emoji))
+            where += " AND replace(e.emoji_key, char(65039), '') = ?"
+            args.append(same_emoji(emoji_key(emoji)))
         if channel_id is not None:
             where += " AND m.channel_id = ?"
             args.append(channel_id)
@@ -137,6 +153,17 @@ class ReactionStore:
             ORDER BY total DESC, author_id LIMIT 20
         """, args).fetchall()
 
+    def mark_alive(self, guild_ids, when):
+        with self.db:
+            self.db.executemany("INSERT OR REPLACE INTO reaction_alive VALUES (?, ?)", [(gid, when) for gid in guild_ids])
+
+    def last_alive(self):
+        """guild id -> when the bot was last seen running there: its heartbeat, or else the end of
+        the last history scan (databases from before heartbeats)."""
+        alive = dict(self.db.execute("SELECT guild_id, finished_at FROM reaction_scans"))
+        alive.update(self.db.execute("SELECT guild_id, seen_at FROM reaction_alive"))
+        return alive
+
     def finish_scan(self, guild_id, problems, channel_id=None, limit=None, checked=0):
         with self.db:
             self.db.execute("""INSERT OR REPLACE INTO reaction_scans
@@ -154,6 +181,12 @@ class ReactionTracker:
         self.progress = {}
         self.live_errors = {}
         self.needs_scan = {}
+        # When each guild was last seen alive: read once at start, before the first heartbeat,
+        # so a restart knows how long it was away; then kept current by heartbeat().
+        self.alive_at = self.store.last_alive()
+        self._boot_alive = dict(self.alive_at)  # the first gap after start goes back to before it
+        self.gap_since = {}  # guild id -> start of the time events may have been missed
+        self.caught_up = {}  # guild id -> when the last catch-up finished
         self.scope = None
         self._scan_changed = None
         self._scan_deleted_channels = None
@@ -218,6 +251,45 @@ class ReactionTracker:
     def note_gap(self, guild_id):
         """Startup/reconnection marks possible offline changes without fetching history."""
         self.needs_scan[guild_id] = self.needs_scan.get(guild_id, 0) + 1
+        since = self._boot_alive.pop(guild_id, None) or self.alive_at.get(guild_id)
+        if since is not None:
+            self.gap_since[guild_id] = min(since, self.gap_since.get(guild_id, since))
+
+    def heartbeat(self, guild_ids):
+        """Record that the bot is running (every minute), for catch_up after the next restart."""
+        now = int(time.time())
+        self.store.mark_alive(guild_ids, now)
+        self.alive_at.update({gid: now for gid in guild_ids})
+
+    def start_catchup(self, guild):
+        """After a restart or reconnect: recheck only messages posted since shortly before the bot
+        was last alive (never full history), then drop the "offline changes" warning. Skipped
+        when that time is unknown or another scan is running."""
+        since = self.gap_since.get(guild.id)
+        if since is None or (self.task is not None and not self.task.done()):
+            return False
+        after = since - CATCHUP_MARGIN
+        self.progress[guild.id] = 0
+        self.scope = (None, None, after)
+        self._scan_changed, self._scan_deleted_channels = set(), set()
+        self.task = asyncio.create_task(self._catchup(guild, after), name="reaction-catchup")
+        return True
+
+    async def _catchup(self, guild, after):
+        gap_before = self.needs_scan.get(guild.id, 0)
+        try:
+            problems = await self._scan_guild(guild, None, None, after=after)
+            if not problems:
+                self.caught_up[guild.id] = int(time.time())
+                if self.needs_scan.get(guild.id, 0) == gap_before:
+                    self.needs_scan.pop(guild.id, None)
+                    self.gap_since.pop(guild.id, None)
+        except Exception:
+            log.exception("Reaction catch-up failed in guild %s", guild.id)
+        finally:
+            self.progress.pop(guild.id, None)
+            self.scope = None
+            self._scan_changed = self._scan_deleted_channels = None
 
     def start_scan(self, guild, limit=None, channel=None):
         if self.task is not None and not self.task.done():
@@ -228,7 +300,9 @@ class ReactionTracker:
         self.task = asyncio.create_task(self._scan(guild, limit, channel), name="reaction-history")
         return True
 
-    def scope_text(self, channel_id, limit):
+    def scope_text(self, channel_id, limit, after=None):
+        if after is not None:
+            return "catching up after a restart: messages since " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(after))
         channel = self.client.get_channel(channel_id) if channel_id is not None else None
         location = f"#{channel.name}" if channel is not None and hasattr(channel, "name") else f"channel/thread {channel_id}"
         if channel_id is None:
@@ -253,13 +327,21 @@ class ReactionTracker:
             return result + f" · {problems} unavailable channels or scan errors · totals may be incomplete"
         if guild_id in self.needs_scan:
             return result + " · offline changes may need a manual rescan"
+        if guild_id in self.caught_up:
+            return result + " · caught up after the last restart · live updates enabled"
         return result + " · live updates enabled"
 
-    async def _scan_channel(self, channel, guild_id, limit=None):
+    async def _scan_channel(self, channel, guild_id, limit=None, after=None):
         # Only prune records that existed before this scan; new live reactions may arrive meanwhile.
         missing = self.store.message_ids(channel.id)
+        window = {}
+        if after is not None:
+            # a catch-up only looks at (and prunes) messages posted since `after`
+            after_id = discord.utils.time_snowflake(datetime.datetime.fromtimestamp(after, datetime.timezone.utc))
+            missing = {mid for mid in missing if mid >= after_id}
+            window = {"after": discord.Object(after_id)}
         checked, oldest_id = 0, None
-        async for message in channel.history(limit=limit, oldest_first=False):
+        async for message in channel.history(limit=limit, oldest_first=False, **window):
             checked += 1
             oldest_id = message.id if oldest_id is None else min(oldest_id, message.id)
             known = message.id in missing
@@ -273,7 +355,7 @@ class ReactionTracker:
             missing = {mid for mid in missing if mid >= oldest_id}
         await self.delete_messages(missing)
 
-    async def _scan_guild(self, guild, limit, selected_channel):
+    async def _scan_guild(self, guild, limit, selected_channel, after=None):
         problems, seen = 0, set()
 
         async def scan(channel):
@@ -286,7 +368,7 @@ class ReactionTracker:
                 problems += 1
                 return
             try:
-                await self._scan_channel(channel, guild.id, limit)
+                await self._scan_channel(channel, guild.id, limit, after)
             except discord.HTTPException:
                 problems += 1
                 log.warning("Reaction history unavailable in channel %s", channel.id, exc_info=True)
@@ -298,8 +380,8 @@ class ReactionTracker:
         for channel in guild.channels:
             if hasattr(channel, "history"):
                 await scan(channel)
-            if not hasattr(channel, "archived_threads"):
-                continue
+            if not hasattr(channel, "archived_threads") or after is not None:
+                continue  # a catch-up skips archived threads: nothing new can be posted there
             perms = channel.permissions_for(guild.me)
             if not perms.view_channel or not perms.read_message_history:
                 if channel.id not in seen:
@@ -325,6 +407,8 @@ class ReactionTracker:
         for thread in threads.values():
             await scan(thread)
 
+        if after is not None:
+            return problems  # deleted channels are left to a full scan
         # Previously counted channels/threads may have been deleted or hidden while offline.
         for channel_id in self.store.channel_ids(guild.id) - seen:
             try:
@@ -349,6 +433,7 @@ class ReactionTracker:
                     self.live_errors.pop(guild.id, None)
                 if self.needs_scan.get(guild.id, 0) == gap_before:
                     self.needs_scan.pop(guild.id, None)
+                    self.gap_since.pop(guild.id, None)
         except Exception:
             problems, finished = 1, True
             log.exception("Reaction history scan failed in guild %s", guild.id)
