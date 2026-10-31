@@ -498,8 +498,9 @@ def test_commands_and_raw_event_registration(bot_closures, monkeypatch):
         await bot["reaction_totals"].callback(i)
         embed = i.response.kwargs["embed"]
         assert "**2** reactions received" in embed.description
-        assert "/1/2/100" in embed.fields[0].value
-        assert "Live tracking only" in embed.footer.text
+        fields = {field.name: field.value for field in embed.fields}
+        assert "/1/2/100" in fields["Most-reacted message"]
+        assert "Live tracking only" in fields["History coverage"]
         assert not i.response.kwargs["allowed_mentions"].users
         await bot["reaction_totals"].callback(i, NS(id=99, display_name="Nobody"))
         assert "No reactions counted yet" in i.response.kwargs["embed"].description
@@ -546,7 +547,7 @@ def test_most_reacted_message_is_hidden_without_channel_access(bot_closures, mon
 
     class Response:
         async def send_message(self, **kwargs):
-            assert kwargs["embed"].fields == []
+            assert all(field.name != "Most-reacted message" for field in kwargs["embed"].fields)
 
     run(bot["reaction_totals"].callback(NS(guild_id=1, user=NS(id=10, display_name="VB"), response=Response())))
 
@@ -568,9 +569,10 @@ def test_commands_combine_channel_and_emoji_filters_and_show_scope(bot_closures)
         await bot["reaction_totals"].callback(i, channel=Channel(3))
         embed = i.response.kwargs["embed"]
         assert "**1** reactions received" in embed.description
-        assert "😂" in embed.description and "❤️" not in embed.description
-        assert embed.fields[0].value == "<#3>"
-        assert "/1/3/101" in embed.fields[1].value
+        fields = {field.name: field.value for field in embed.fields}
+        assert "😂" in fields["By emoji"] and "❤️" not in fields["By emoji"]
+        assert "<#3>" in embed.description
+        assert "/1/3/101" in fields["Most-reacted message"]
         await bot["reaction_board"].callback(i, "❤️", Channel(3))
         embed = i.response.kwargs["embed"]
         assert "<@30>" in embed.description and "<@10>" not in embed.description
@@ -579,7 +581,7 @@ def test_commands_combine_channel_and_emoji_filters_and_show_scope(bot_closures)
         assert "No reactions counted" in i.response.kwargs["embed"].description
         await bot["reaction_totals"].callback(i, NS(id=30, display_name="Alex"), Channel(3))
         assert "Alex" in i.response.kwargs["embed"].title
-        assert "❤️" in i.response.kwargs["embed"].description
+        assert "❤️" in next(field.value for field in i.response.kwargs["embed"].fields if field.name == "By emoji")
 
     run(flow())
     for command in (bot["reaction_totals"], bot["reaction_board"]):

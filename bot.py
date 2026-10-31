@@ -2,6 +2,7 @@ import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re, sys, temp
 from discord.ext import tasks
 from dotenv import load_dotenv
 from reaction_stats import ReactionTracker, parse_scan_limit
+from reaction_report import ReactionReport, add_scan_status
 
 ReactionChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
@@ -816,18 +817,15 @@ def run_discord_bot():
 				return
 			user = user or interaction.user
 			total, breakdown, top = reaction_tracker.store.summary(interaction.guild_id, user.id, channel.id if channel else None)
-			embed = discord.Embed(title=f"Reactions received by {user.display_name}", color=0x5865F2,
-				description=f"**{total:,}** reactions received\n\n" + (utils.fit_items(
-					[f"{emoji} **{count:,}**" for emoji, count in breakdown], 3500) if breakdown else "No reactions counted yet."))
-			if channel is not None:
-				embed.add_field(name="Channel filter", value=channel.mention)
+			most_reacted = None
 			if top:
 				channel_id, message_id, count = top
 				top_channel = channel or client.get_channel(channel_id)
 				if top_channel and (perms := top_channel.permissions_for(interaction.user)).view_channel and perms.read_message_history:
-					embed.add_field(name="Most-reacted message", value=f"[Jump to message](https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}) · {count:,} reactions")
-			embed.set_footer(text=reaction_tracker.status(interaction.guild_id) + " · bots and self-reactions excluded")
-			await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+					most_reacted = (f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}", count)
+			report = ReactionReport(interaction, user, total, breakdown, channel, most_reacted, reaction_tracker)
+			await interaction.response.send_message(embed=report.embed(), view=report if report.pages > 1 else None,
+				allowed_mentions=discord.AllowedMentions.none())
 
 		@tree.command(name="reactionboard", description="Rank people by reactions received")
 		@discord.app_commands.guild_only()
@@ -842,7 +840,8 @@ def run_discord_bot():
 				embed.add_field(name="Emoji filter", value=emoji[:100])
 			if channel is not None:
 				embed.add_field(name="Channel filter", value=channel.mention)
-			embed.set_footer(text=reaction_tracker.status(interaction.guild_id) + " · bots and self-reactions excluded")
+			add_scan_status(embed, reaction_tracker, interaction.guild_id)
+			embed.set_footer(text="Bots and self-reactions excluded")
 			await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 		class EditRepost(discord.ui.Modal, title="Edit repost"):
