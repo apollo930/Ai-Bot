@@ -405,7 +405,9 @@ def test_incomplete_history_keeps_unseen_records_and_reports_partial_coverage(tm
 
     run(flow())
     assert tracker.store.summary(1, 10)[0] == 1
-    assert "2 unavailable channels or scan errors" in tracker.status(1)
+    # the failed history is an error; the channel the bot can't read is reported apart, not as an error
+    assert "1 scan error · totals may be incomplete" in tracker.status(1)
+    assert "1 channel the bot can't read isn't counted" in tracker.status(1)
 
 
 def test_bounded_scan_keeps_older_totals_and_prunes_only_deleted_messages_in_range(tmp_path):

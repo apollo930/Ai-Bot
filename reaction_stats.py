@@ -76,7 +76,8 @@ class ReactionStore:
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(reaction_scans)")}
         for name, definition in (("channel_id", "INTEGER"), ("message_limit", "INTEGER"),
-                                 ("checked", "INTEGER NOT NULL DEFAULT 0")):
+                                 ("checked", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("hidden", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE reaction_scans ADD COLUMN {name} {definition}")
         self.db.commit()
@@ -212,11 +213,13 @@ class ReactionStore:
         alive.update(self.db.execute("SELECT guild_id, seen_at FROM reaction_alive"))
         return alive
 
-    def finish_scan(self, guild_id, problems, channel_id=None, limit=None, checked=0):
+    def finish_scan(self, guild_id, problems, channel_id=None, limit=None, checked=0, hidden=0):
+        """problems: scan errors; hidden: channels/threads the bot isn't allowed to read (by design
+        not counted, so not an error)."""
         with self.db:
             self.db.execute("""INSERT OR REPLACE INTO reaction_scans
-                (guild_id, finished_at, problems, channel_id, message_limit, checked)
-                VALUES (?, ?, ?, ?, ?, ?)""", (guild_id, int(time.time()), problems, channel_id, limit, checked))
+                (guild_id, finished_at, problems, channel_id, message_limit, checked, hidden)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""", (guild_id, int(time.time()), problems, channel_id, limit, checked, hidden))
 
 
 class ReactionTracker:
@@ -237,6 +240,7 @@ class ReactionTracker:
         self._boot_alive = dict(self.alive_at)  # the first gap after start goes back to before it
         self.gap_since = {}  # guild id -> start of the time events may have been missed
         self.caught_up = {}  # guild id -> when the last catch-up finished
+        self.hidden_channels = 0  # channels/threads the running scan found the bot can't read
         self._looked_up = {}  # channel id -> channel/thread fetched from Discord (archived threads), or None if gone
         self.scope = None
         self._scan_changed = None
@@ -255,6 +259,8 @@ class ReactionTracker:
                     return
                 if message.webhook_id:
                     author_id = self.repost_owner(message) or self.store.owner(message.id)
+                    if author_id == message.webhook_id:
+                        author_id = None  # an old repost whose Delete button holds the webhook, not a person
                 else:
                     author_id = None if message.author.bot else message.author.id
                 entries = set()
@@ -498,18 +504,20 @@ class ReactionTracker:
         progress = self.progress.get(guild_id)
         if progress is not None:
             return f"History scan running · {self.scope_text(*self.scope)} · {progress:,} checked · totals are provisional"
-        row = self.store.db.execute("SELECT finished_at, problems, channel_id, message_limit, checked FROM reaction_scans WHERE guild_id = ?", (guild_id,)).fetchone()
+        row = self.store.db.execute("SELECT finished_at, problems, channel_id, message_limit, checked, hidden FROM reaction_scans WHERE guild_id = ?", (guild_id,)).fetchone()
         if not row:
             if self.live_errors.get(guild_id):
                 return "Live tracking only · some live updates failed; admins: /reactionscan to reconcile"
             return "Live tracking only · admins: /reactionscan to include older or offline reactions"
-        stamp, problems, channel_id, limit, checked = row
+        stamp, problems, channel_id, limit, checked, hidden = row
         date = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(stamp))
         result = f"Last scan: {date} · {self.scope_text(channel_id, limit)} · {checked:,} checked"
+        if hidden:
+            result += f" · {hidden} channel{'s' if hidden != 1 else ''} the bot can't read {'aren' if hidden != 1 else 'isn'}'t counted"
         if self.live_errors.get(guild_id):
             return result + " · some live updates failed; admins can rescan"
         if problems:
-            return result + f" · {problems} unavailable channels or scan errors · totals may be incomplete"
+            return result + f" · {problems} scan error{'s' if problems != 1 else ''} · totals may be incomplete"
         if guild_id in self.needs_scan:
             return result + " · offline changes may need a manual rescan"
         if guild_id in self.caught_up:
@@ -541,7 +549,10 @@ class ReactionTracker:
         await self.delete_messages(missing)
 
     async def _scan_guild(self, guild, limit, selected_channel, after=None):
+        """Scan the guild; returns the number of scan errors. Channels/threads the bot isn't allowed
+        to read are counted apart, in self.hidden_channels (not errors: nothing there is counted)."""
         problems, seen = 0, set()
+        self.hidden_channels = 0
 
         async def scan(channel):
             nonlocal problems
@@ -550,8 +561,7 @@ class ReactionTracker:
             seen.add(channel.id)
             perms = channel.permissions_for(guild.me)
             if not perms.view_channel or not perms.read_message_history:
-                if after is None:  # a catch-up has nothing to refresh where the bot can't read
-                    problems += 1
+                self.hidden_channels += 1
                 return
             try:
                 await self._scan_channel(channel, guild.id, limit, after)
@@ -571,7 +581,7 @@ class ReactionTracker:
             perms = channel.permissions_for(guild.me)
             if not perms.view_channel or not perms.read_message_history:
                 if channel.id not in seen:
-                    problems += 1
+                    self.hidden_channels += 1
                 continue
             options = [{}]
             if isinstance(channel, discord.TextChannel):
@@ -628,4 +638,5 @@ class ReactionTracker:
             self.scope = None
             self._scan_changed = self._scan_deleted_channels = None
             if finished:
-                self.store.finish_scan(guild.id, problems, channel.id if channel else None, limit, checked)
+                self.store.finish_scan(guild.id, problems, channel.id if channel else None, limit, checked,
+                                       getattr(self, "hidden_channels", 0))

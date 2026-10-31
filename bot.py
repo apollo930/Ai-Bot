@@ -870,7 +870,9 @@ def run_discord_bot():
 				for item in getattr(row, "children", []):
 					cid = getattr(item, "custom_id", None) or ""
 					if cid.startswith("dellink:"):
-						return int(cid.split(":", 1)[1])
+						owner = int(cid.split(":", 1)[1])
+						# a few old reposts of reposts hold the webhook's own id there: no person
+						return None if owner == message.webhook_id else owner
 			return None
 
 		reaction_tracker = ReactionTracker(client, repost_owner)
@@ -966,6 +968,23 @@ def run_discord_bot():
 			await send(embed=report.embed(), view=report if report.pages > 1 else None,
 				allowed_mentions=discord.AllowedMentions.none())
 
+		user_names = {}  # user id -> name for people no longer in the server (None: Discord doesn't know them)
+
+		async def person(guild, user_id):
+			"""A mention for a member; for someone who left, their name (a raw <@id> would show)."""
+			if guild is None or guild.get_member(user_id) is not None:
+				return f"<@{user_id}>"
+			if user_id not in user_names:
+				user = client.get_user(user_id)
+				if user is None:
+					try:
+						user = await asyncio.wait_for(client.fetch_user(user_id), 1.5)
+					except (discord.HTTPException, TimeoutError):
+						user = None
+				user_names[user_id] = discord.utils.escape_markdown(user.display_name) if user else None
+			name = user_names[user_id]
+			return f"{name} (left)" if name else "former member"
+
 		@tree.command(name="reactionboard", description="Rank people by reactions received or sent")
 		@discord.app_commands.guild_only()
 		@discord.app_commands.describe(emoji="Optional emoji filter: Unicode emoji, custom emoji, or custom emoji ID", channel="Only this channel or thread (defaults to the whole server)",
@@ -978,14 +997,14 @@ def run_discord_bot():
 			heading = "Total sent · most-used emoji" if sort == "sent" else "Total received · top emoji"
 			embed = discord.Embed(title="Reaction leaderboard · Sent" if sort == "sent" else "Reaction leaderboard", color=0x5865F2,
 				description=(heading + "\n\n" + "\n".join(
-					f"**{rank}.** <@{user_id}> — **{count:,}** · {top_emoji}"
-					for rank, (user_id, count, top_emoji) in enumerate(rows, 1))) if rows else "No reactions counted for this selection yet.")
+					[f"**{rank}.** {await person(client.get_guild(interaction.guild_id), user_id)} — **{count:,}** · {top_emoji}"
+					for rank, (user_id, count, top_emoji) in enumerate(rows, 1)])) if rows else "No reactions counted for this selection yet.")
 			if emoji:
 				embed.add_field(name="Emoji filter", value=emoji[:100])
 			if channel is not None:
 				embed.add_field(name="Channel filter", value=channel.mention)
 			add_scan_status(embed, reaction_tracker, interaction.guild_id)
-			embed.set_footer(text="Bots and self-reactions excluded · only channels you can read count")
+			embed.set_footer(text="Bots and self-reactions excluded" + (" · only channels you can read count" if channel is None else ""))
 			await send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 		class EditRepost(discord.ui.Modal, title="Edit repost"):
