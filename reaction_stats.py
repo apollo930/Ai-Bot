@@ -103,6 +103,23 @@ class ReactionStore:
             self.db.executemany("INSERT OR IGNORE INTO reaction_entries VALUES (?, ?, ?, ?)",
                                 [(message_id, user, key, display) for user, key, display in entries])
 
+    def add_entry(self, guild_id, channel_id, message_id, author_id, user_id, key, display):
+        """One reaction added (a live event): no Discord request needed. A normal and a super
+        reaction with the same emoji from the same person stay one entry."""
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO reaction_messages VALUES (?, ?, ?, ?)", (message_id, guild_id, channel_id, author_id))
+            self.db.execute("INSERT OR IGNORE INTO reaction_entries VALUES (?, ?, ?, ?)", (message_id, user_id, key, display))
+
+    def replace_emoji(self, message_id, key, entries):
+        """Replace one emoji's entries on a message (after a removal or a cleared emoji); a message
+        left with no counted reactions is dropped, as replace() does."""
+        with self.db:
+            self.db.execute("DELETE FROM reaction_entries WHERE message_id = ? AND emoji_key = ?", (message_id, key))
+            self.db.executemany("INSERT OR IGNORE INTO reaction_entries VALUES (?, ?, ?, ?)",
+                                [(message_id, user, k, display) for user, k, display in entries])
+            if self.db.execute("SELECT 1 FROM reaction_entries WHERE message_id = ? LIMIT 1", (message_id,)).fetchone() is None:
+                self.db.execute("DELETE FROM reaction_messages WHERE message_id = ?", (message_id,))
+
     def delete_messages(self, message_ids):
         with self.db:
             self.db.executemany("DELETE FROM reaction_messages WHERE message_id = ?", [(mid,) for mid in message_ids])
@@ -186,6 +203,8 @@ class ReactionStore:
 class ReactionTracker:
     def __init__(self, client, repost_owner, path="links.db"):
         self.client, self.repost_owner = client, repost_owner
+        # repost owner by message id alone (the bot sets it), so live reactions on reposts need no fetch
+        self.repost_owner_id = None
         self.store = ReactionStore(path)
         # Fetch and commit under the same lock: live events cannot be overwritten by an older scan.
         self.lock = asyncio.Lock()
@@ -240,6 +259,8 @@ class ReactionTracker:
         if self._scan_changed is not None:
             self._scan_changed.add(payload.message_id)
         try:
+            if await self._apply_event(payload):
+                return
             channel = self.client.get_channel(payload.channel_id) or await self.client.fetch_channel(payload.channel_id)
             await self.sync_message(channel, payload.message_id)
         except discord.NotFound:
@@ -247,6 +268,87 @@ class ReactionTracker:
         except discord.HTTPException:
             self.live_errors[payload.guild_id] = self.live_errors.get(payload.guild_id, 0) + 1
             log.warning("Could not reconcile reactions on message %s", payload.message_id, exc_info=True)
+
+    _BOT_AUTHOR = object()
+
+    def _author(self, payload):
+        """Who a reacted message credits, without asking Discord: its saved author, our repost's
+        owner, or a known member (_BOT_AUTHOR for bots). None when unsure (another webhook, someone
+        who left), so the caller reads the message instead."""
+        owner = self.store.owner(payload.message_id)
+        if owner is not None:
+            return owner
+        if self.repost_owner_id is not None:
+            owner = self.repost_owner_id(payload.message_id)
+            if owner is not None:
+                return owner
+        author_id = getattr(payload, "message_author_id", None)
+        guild = self.client.get_guild(payload.guild_id) if hasattr(self.client, "get_guild") else None
+        member = guild.get_member(author_id) if guild is not None and author_id is not None else None
+        if member is None:
+            return None
+        return self._BOT_AUTHOR if member.bot else member.id
+
+    async def _apply_event(self, payload):
+        """Apply a live reaction event straight to the counts when that's safe, instead of reading
+        the whole message and every reactor again. True when handled."""
+        kind = getattr(payload, "event_type", None)
+        if isinstance(payload, discord.RawReactionClearEvent):
+            await self.delete_messages([payload.message_id])
+            return True
+        if isinstance(payload, discord.RawReactionClearEmojiEvent):
+            async with self.lock:
+                self.store.replace_emoji(payload.message_id, emoji_key(payload.emoji), set())
+            return True
+        if kind == "REACTION_ADD":
+            if payload.member is not None and payload.member.bot:
+                return True  # bots' reactions (⏳, ⚠️, 🎵) never count
+            async with self.lock:
+                author = self._author(payload)
+                if author is None:
+                    return False
+                if author is not self._BOT_AUTHOR and author != payload.user_id:
+                    self.store.add_entry(payload.guild_id, payload.channel_id, payload.message_id, author,
+                                         payload.user_id, emoji_key(payload.emoji), str(payload.emoji))
+            return True
+        if kind == "REACTION_REMOVE":
+            guild = self.client.get_guild(payload.guild_id) if hasattr(self.client, "get_guild") else None
+            remover = guild.get_member(payload.user_id) if guild is not None else None
+            if remover is not None and remover.bot:
+                return True
+            if self.store.owner(payload.message_id) is None:
+                return True  # nothing counted on that message, so a removal changes nothing
+            # The person may still have the other kind (normal/super) of the same emoji: re-read
+            # just this emoji's reactors, not the whole message.
+            await self._refresh_emoji(payload)
+            return True
+        return False
+
+    async def _refresh_emoji(self, payload):
+        key = emoji_key(payload.emoji)
+        async with self.lock:
+            if self._scan_deleted_channels is not None and payload.channel_id in self._scan_deleted_channels:
+                return
+            author = self.store.owner(payload.message_id)
+            if author is None:
+                return
+            channel = self.client.get_channel(payload.channel_id) or await self.client.fetch_channel(payload.channel_id)
+            try:
+                message = await channel.fetch_message(payload.message_id)
+            except discord.NotFound:
+                self.store.delete_messages([payload.message_id])
+                return
+            entries = set()
+            for reaction in message.reactions:
+                if emoji_key(reaction.emoji) != key:
+                    continue
+                for kind, count in ((discord.ReactionType.normal, reaction.normal_count),
+                                    (discord.ReactionType.burst, reaction.burst_count)):
+                    if count:
+                        async for user in reaction.users(limit=None, type=kind):
+                            if not user.bot and user.id != author:
+                                entries.add((user.id, key, str(reaction.emoji)))
+            self.store.replace_emoji(payload.message_id, key, entries)
 
     async def delete_messages(self, message_ids):
         message_ids = list(message_ids)

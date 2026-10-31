@@ -873,6 +873,7 @@ def run_discord_bot():
 			return None
 
 		reaction_tracker = ReactionTracker(client, repost_owner)
+		reaction_tracker.repost_owner_id = repost_owners.owner  # live reactions on reposts need no message fetch
 
 		async def readable_for(interaction, channel):
 			"""(channel ids the asker can read, or None for a single selected channel; how to send the
