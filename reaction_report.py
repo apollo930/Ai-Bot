@@ -47,7 +47,7 @@ class ReactionReport(discord.ui.View):
             embed.add_field(name="Most-reacted message", inline=False,
                             value=f"[Jump to message]({url}) · **{count:,}** reactions")
         add_scan_status(embed, self.tracker, self.interaction.guild_id)
-        footer = "Bots and self-reactions excluded"
+        footer = "Bots and self-reactions excluded" + (" · only channels you can read count" if self.channel is None else "")
         if self.pages > 1:
             footer = f"Page {self.page + 1}/{self.pages} · {len(self.breakdown):,} emoji · " + footer
         embed.set_footer(text=footer)

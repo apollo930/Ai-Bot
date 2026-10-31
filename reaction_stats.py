@@ -117,18 +117,29 @@ class ReactionStore:
     def channel_ids(self, guild_id):
         return {row[0] for row in self.db.execute("SELECT DISTINCT channel_id FROM reaction_messages WHERE guild_id = ?", (guild_id,))}
 
-    def summary(self, guild_id, author_id, channel_id=None):
+    @staticmethod
+    def _only_channels(channels, args):
+        """SQL limiting results to these channel ids (the ones the asker can read); None = all."""
+        if channels is None:
+            return ""
+        channels = sorted(channels)
+        args.extend(channels)
+        return f" AND m.channel_id IN ({','.join('?' * len(channels))})" if channels else " AND 0"
+
+    def summary(self, guild_id, author_id, channel_id=None, channels=None):
         args = [guild_id, author_id]
         where = "FROM reaction_entries e JOIN reaction_messages m USING (message_id) WHERE m.guild_id = ? AND m.author_id = ?"
         if channel_id is not None:
             where += " AND m.channel_id = ?"
             args.append(channel_id)
+        where += self._only_channels(channels, args)
         breakdown = self.db.execute("SELECT MAX(e.emoji_display), COUNT(*) " + where + " GROUP BY e.emoji_key ORDER BY COUNT(*) DESC, e.emoji_key", args).fetchall()
         top = self.db.execute("SELECT m.channel_id, m.message_id, COUNT(*) " + where + " GROUP BY m.message_id ORDER BY COUNT(*) DESC, m.message_id DESC LIMIT 1", args).fetchone()
         return sum(count for _, count in breakdown), breakdown, top
 
-    def leaderboard(self, guild_id, emoji=None, channel_id=None):
-        """Return (author, total, top emoji) within the selected filters; ties use emoji ID/key."""
+    def leaderboard(self, guild_id, emoji=None, channel_id=None, channels=None):
+        """Return (author, total, top emoji) within the selected filters; ties use emoji ID/key.
+        channels, when given, limits the count to those channel/thread ids."""
         where = "WHERE m.guild_id = ?"
         args = [guild_id]
         if emoji is not None:
@@ -137,6 +148,7 @@ class ReactionStore:
         if channel_id is not None:
             where += " AND m.channel_id = ?"
             args.append(channel_id)
+        where += self._only_channels(channels, args)
         return self.db.execute(f"""
             WITH emoji_counts AS (
                 SELECT m.author_id, e.emoji_key, MAX(e.emoji_display) AS display, COUNT(*) AS n
@@ -187,6 +199,7 @@ class ReactionTracker:
         self._boot_alive = dict(self.alive_at)  # the first gap after start goes back to before it
         self.gap_since = {}  # guild id -> start of the time events may have been missed
         self.caught_up = {}  # guild id -> when the last catch-up finished
+        self._looked_up = {}  # channel id -> channel/thread fetched from Discord (archived threads), or None if gone
         self.scope = None
         self._scan_changed = None
         self._scan_deleted_channels = None
@@ -247,6 +260,46 @@ class ReactionTracker:
             self._scan_deleted_channels.add(channel_id)
         async with self.lock:
             self.store.delete_channel(channel_id)
+
+    def readable_now(self, guild_id, member):
+        """(ids of counted channels/threads member can read, ids not in the bot's memory). Server-wide
+        totals only count what the asker could see; archived threads need looking up first."""
+        readable, unknown = set(), set()
+        for channel_id in self.store.channel_ids(guild_id):
+            channel = self.client.get_channel(channel_id) or self._looked_up.get(channel_id)
+            if channel is None:
+                if channel_id not in self._looked_up:
+                    unknown.add(channel_id)
+                continue
+            if self._can_read(channel, member):
+                readable.add(channel_id)
+        return readable, unknown
+
+    async def readable_after_lookup(self, unknown, member):
+        """Look up channels/threads not in the bot's memory (once per run) and return those member can read."""
+        readable = set()
+        for channel_id in unknown:
+            try:
+                channel = await self.client.fetch_channel(channel_id)
+            except discord.HTTPException:
+                channel = None  # deleted, or hidden from the bot
+            self._looked_up[channel_id] = channel
+            if channel is not None and self._can_read(channel, member):
+                readable.add(channel_id)
+        return readable
+
+    @staticmethod
+    def _can_read(channel, member):
+        try:
+            perms = channel.permissions_for(member)
+        except (discord.ClientException, AttributeError):
+            return False  # a thread whose parent channel is unknown
+        if not perms.view_channel or not perms.read_message_history:
+            return False
+        if getattr(channel, "type", None) == discord.ChannelType.private_thread:
+            # private threads: members only; membership isn't known here, so the creator and moderators
+            return perms.manage_threads or getattr(channel, "owner_id", None) == member.id
+        return True
 
     def note_gap(self, guild_id):
         """Startup/reconnection marks possible offline changes without fetching history."""

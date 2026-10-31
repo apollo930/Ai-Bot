@@ -874,6 +874,27 @@ def run_discord_bot():
 
 		reaction_tracker = ReactionTracker(client, repost_owner)
 
+		async def readable_for(interaction, channel):
+			"""(channel ids the asker can read, or None for a single selected channel; how to send the
+			answer). Server-wide totals leave out channels the asker can't see. Threads the bot has no
+			record of in memory are looked up first, so then the answer is deferred (Discord waits 3 s)."""
+			async def send_now(**kwargs):
+				await interaction.response.send_message(**kwargs)
+
+			if channel is not None:
+				return None, send_now
+			readable, unknown = reaction_tracker.readable_now(interaction.guild_id, interaction.user)
+			if not unknown:
+				return readable, send_now
+			await interaction.response.defer(thinking=True)
+			readable |= await reaction_tracker.readable_after_lookup(unknown, interaction.user)
+
+			async def send_later(**kwargs):
+				kwargs.pop("ephemeral", None)
+				await interaction.edit_original_response(**kwargs)
+
+			return readable, send_later
+
 		async def check_reaction_channel(interaction, channel):
 			if channel is not None:
 				perms = channel.permissions_for(interaction.user)
@@ -930,7 +951,8 @@ def run_discord_bot():
 			if not await check_reaction_channel(interaction, channel):
 				return
 			user = user or interaction.user
-			total, breakdown, top = reaction_tracker.store.summary(interaction.guild_id, user.id, channel.id if channel else None)
+			readable, send = await readable_for(interaction, channel)
+			total, breakdown, top = reaction_tracker.store.summary(interaction.guild_id, user.id, channel.id if channel else None, readable)
 			most_reacted = None
 			if top:
 				channel_id, message_id, count = top
@@ -938,7 +960,7 @@ def run_discord_bot():
 				if top_channel and (perms := top_channel.permissions_for(interaction.user)).view_channel and perms.read_message_history:
 					most_reacted = (f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}", count)
 			report = ReactionReport(interaction, user, total, breakdown, channel, most_reacted, reaction_tracker)
-			await interaction.response.send_message(embed=report.embed(), view=report if report.pages > 1 else None,
+			await send(embed=report.embed(), view=report if report.pages > 1 else None,
 				allowed_mentions=discord.AllowedMentions.none())
 
 		@tree.command(name="reactionboard", description="Rank people by reactions received")
@@ -947,7 +969,8 @@ def run_discord_bot():
 		async def reaction_board(interaction: discord.Interaction, emoji: str = None, channel: ReactionChannel = None):
 			if not await check_reaction_channel(interaction, channel):
 				return
-			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None)
+			readable, send = await readable_for(interaction, channel)
+			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None, readable)
 			embed = discord.Embed(title="Reaction leaderboard", color=0x5865F2,
 				description=("Total received · top emoji\n\n" + "\n".join(
 					f"**{rank}.** <@{user_id}> — **{count:,}** · {top_emoji}"
@@ -957,8 +980,8 @@ def run_discord_bot():
 			if channel is not None:
 				embed.add_field(name="Channel filter", value=channel.mention)
 			add_scan_status(embed, reaction_tracker, interaction.guild_id)
-			embed.set_footer(text="Bots and self-reactions excluded")
-			await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+			embed.set_footer(text="Bots and self-reactions excluded · only channels you can read count")
+			await send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 		class EditRepost(discord.ui.Modal, title="Edit repost"):
 			def __init__(self, message: discord.Message):
