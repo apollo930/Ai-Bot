@@ -261,34 +261,44 @@ class ReactionTracker:
         self.store.mark_alive(guild_ids, now)
         self.alive_at.update({gid: now for gid in guild_ids})
 
-    def start_catchup(self, guild):
+    def start_catchup(self, guilds):
         """After a restart or reconnect: recheck only messages posted since shortly before the bot
-        was last alive (never full history), then drop the "offline changes" warning. Skipped
-        when that time is unknown or another scan is running."""
-        since = self.gap_since.get(guild.id)
-        if since is None or (self.task is not None and not self.task.done()):
+        was last alive (never full history), then drop the "offline changes" warning. Guilds go
+        one after another in one background task. Skipped for a guild whose time is unknown, and
+        entirely while another scan is running."""
+        todo = [g for g in guilds if self.gap_since.get(g.id) is not None]
+        if not todo or (self.task is not None and not self.task.done()):
             return False
-        after = since - CATCHUP_MARGIN
-        self.progress[guild.id] = 0
-        self.scope = (None, None, after)
         self._scan_changed, self._scan_deleted_channels = set(), set()
-        self.task = asyncio.create_task(self._catchup(guild, after), name="reaction-catchup")
+        # show progress right away: reports run before the task gets its first turn
+        self.progress[todo[0].id] = 0
+        self.scope = (None, None, self.gap_since[todo[0].id] - CATCHUP_MARGIN)
+        self.task = asyncio.create_task(self._catchup(todo), name="reaction-catchup")
         return True
 
-    async def _catchup(self, guild, after):
-        gap_before = self.needs_scan.get(guild.id, 0)
+    async def _catchup(self, guilds):
         try:
-            problems = await self._scan_guild(guild, None, None, after=after)
-            if not problems:
-                self.caught_up[guild.id] = int(time.time())
-                if self.needs_scan.get(guild.id, 0) == gap_before:
-                    self.needs_scan.pop(guild.id, None)
-                    self.gap_since.pop(guild.id, None)
-        except Exception:
-            log.exception("Reaction catch-up failed in guild %s", guild.id)
+            for guild in guilds:
+                after = self.gap_since[guild.id] - CATCHUP_MARGIN
+                gap_before = self.needs_scan.get(guild.id, 0)
+                self.progress[guild.id] = 0
+                self.scope = (None, None, after)
+                try:
+                    problems = await self._scan_guild(guild, None, None, after=after)
+                except Exception:
+                    log.exception("Reaction catch-up failed in guild %s", guild.id)
+                    continue
+                finally:
+                    checked = self.progress.pop(guild.id, 0)
+                    self.scope = None
+                log.info("Reaction catch-up in guild %s: %s messages since %s checked, %s problems",
+                         guild.id, checked, time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(after)), problems)
+                if not problems:
+                    self.caught_up[guild.id] = int(time.time())
+                    if self.needs_scan.get(guild.id, 0) == gap_before:
+                        self.needs_scan.pop(guild.id, None)
+                        self.gap_since.pop(guild.id, None)
         finally:
-            self.progress.pop(guild.id, None)
-            self.scope = None
             self._scan_changed = self._scan_deleted_channels = None
 
     def start_scan(self, guild, limit=None, channel=None):

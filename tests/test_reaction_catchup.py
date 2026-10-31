@@ -59,7 +59,7 @@ def test_catchup_rechecks_only_recent_messages_and_clears_the_warning(tmp_path):
     assert "offline changes" in tracker.status(1) or "Live tracking" in tracker.status(1)
 
     async def flow():
-        assert tracker.start_catchup(guild([channel]))
+        assert tracker.start_catchup([guild([channel])])
         assert "catching up after a restart" in tracker.status(1)
         await tracker.task
 
@@ -80,7 +80,7 @@ def snowflake_floor(when, asked):
 def test_no_known_alive_time_means_no_catchup(tmp_path):
     tracker = ReactionTracker(Client(), lambda m: None, tmp_path / "links.db")
     tracker.note_gap(1)
-    assert tracker.start_catchup(guild([])) is False
+    assert tracker.start_catchup([guild([])]) is False
     assert tracker.task is None and 1 in tracker.needs_scan
 
 
@@ -107,8 +107,29 @@ def test_catchup_waits_for_a_running_scan(tmp_path):
     async def flow():
         slow = asyncio.Event()
         tracker.task = asyncio.create_task(slow.wait())
-        assert tracker.start_catchup(guild([])) is False
+        assert tracker.start_catchup([guild([])]) is False
         slow.set()
         await tracker.task
 
     run(flow())
+
+
+def test_catchup_covers_every_guild_one_after_another(tmp_path):
+    path = tmp_path / "links.db"
+    store = ReactionStore(path)
+    store.mark_alive([1, 2], int(time.time()) - 60)
+    store.db.close()
+    a, b = WindowChannel(10, [message(snowflake(30))]), WindowChannel(20, [message(snowflake(30))])
+    g1, g2 = guild([a]), guild([b])
+    g2.id = 2
+    tracker = ReactionTracker(Client(channels=[a, b]), lambda m: None, path)
+    tracker.note_gap(1)
+    tracker.note_gap(2)
+
+    async def flow():
+        assert tracker.start_catchup([g1, g2])
+        await tracker.task
+
+    run(flow())
+    assert len(a.asked_after) == 1 and len(b.asked_after) == 1
+    assert not tracker.needs_scan and set(tracker.caught_up) == {1, 2}

@@ -66,8 +66,9 @@ def run_discord_bot():
 				check_reactions.start()
 			for guild in client.guilds:
 				reaction_tracker.note_gap(guild.id)
-				# reactions while the bot was away: recheck messages from just before then (not full history)
-				reaction_tracker.start_catchup(guild)
+			# reactions while the bot was away: recheck messages from just before then (not full history)
+			reaction_tracker.start_catchup(client.guilds)
+			for guild in client.guilds:
 				if guild.system_channel:
 					await guild.system_channel.send("Bot is online!")
 			try:
@@ -108,7 +109,7 @@ def run_discord_bot():
 		async def on_resumed():
 			for guild in client.guilds:
 				reaction_tracker.note_gap(guild.id)
-				reaction_tracker.start_catchup(guild)
+			reaction_tracker.start_catchup(client.guilds)
 
 		async def load_button_emojis():
 			"""Logo emojis for the link buttons: emojis/*.png, uploaded once as the bot's own
