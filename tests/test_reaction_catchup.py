@@ -133,3 +133,21 @@ def test_catchup_covers_every_guild_one_after_another(tmp_path):
     run(flow())
     assert len(a.asked_after) == 1 and len(b.asked_after) == 1
     assert not tracker.needs_scan and set(tracker.caught_up) == {1, 2}
+
+
+def test_catchup_ignores_channels_the_bot_cannot_read(tmp_path):
+    path = tmp_path / "links.db"
+    store = ReactionStore(path)
+    store.mark_alive([1], int(time.time()) - 60)
+    store.db.close()
+    readable = WindowChannel(10, [message(snowflake(30))])
+    hidden = WindowChannel(11, [message(snowflake(30))], allowed=False)
+    tracker = ReactionTracker(Client(channels=[readable, hidden]), lambda m: None, path)
+    tracker.note_gap(1)
+
+    async def flow():
+        assert tracker.start_catchup([guild([readable, hidden])])
+        await tracker.task
+
+    run(flow())
+    assert hidden.asked_after == [] and 1 not in tracker.needs_scan and 1 in tracker.caught_up

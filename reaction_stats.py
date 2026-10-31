@@ -376,7 +376,8 @@ class ReactionTracker:
             seen.add(channel.id)
             perms = channel.permissions_for(guild.me)
             if not perms.view_channel or not perms.read_message_history:
-                problems += 1
+                if after is None:  # a catch-up has nothing to refresh where the bot can't read
+                    problems += 1
                 return
             try:
                 await self._scan_channel(channel, guild.id, limit, after)
