@@ -1,6 +1,7 @@
 import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re, sys, tempfile
 from discord.ext import tasks
 from dotenv import load_dotenv
+from typing import Literal
 from reaction_stats import ReactionTracker, parse_scan_limit
 from reaction_report import ReactionReport, add_scan_status
 
@@ -964,16 +965,18 @@ def run_discord_bot():
 			await send(embed=report.embed(), view=report if report.pages > 1 else None,
 				allowed_mentions=discord.AllowedMentions.none())
 
-		@tree.command(name="reactionboard", description="Rank people by reactions received")
+		@tree.command(name="reactionboard", description="Rank people by reactions received or sent")
 		@discord.app_commands.guild_only()
-		@discord.app_commands.describe(emoji="Optional emoji filter: Unicode emoji, custom emoji, or custom emoji ID", channel="Only this channel or thread (defaults to the whole server)")
-		async def reaction_board(interaction: discord.Interaction, emoji: str = None, channel: ReactionChannel = None):
+		@discord.app_commands.describe(emoji="Optional emoji filter: Unicode emoji, custom emoji, or custom emoji ID", channel="Only this channel or thread (defaults to the whole server)",
+			sort="Rank by reactions received or given (defaults to received)")
+		async def reaction_board(interaction: discord.Interaction, emoji: str = None, channel: ReactionChannel = None, sort: Literal["received", "sent"] = "received"):
 			if not await check_reaction_channel(interaction, channel):
 				return
 			readable, send = await readable_for(interaction, channel)
-			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None, readable)
-			embed = discord.Embed(title="Reaction leaderboard", color=0x5865F2,
-				description=("Total received · top emoji\n\n" + "\n".join(
+			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None, readable, sort=sort)
+			heading = "Total sent · most-used emoji" if sort == "sent" else "Total received · top emoji"
+			embed = discord.Embed(title="Reaction leaderboard · Sent" if sort == "sent" else "Reaction leaderboard", color=0x5865F2,
+				description=(heading + "\n\n" + "\n".join(
 					f"**{rank}.** <@{user_id}> — **{count:,}** · {top_emoji}"
 					for rank, (user_id, count, top_emoji) in enumerate(rows, 1))) if rows else "No reactions counted for this selection yet.")
 			if emoji:

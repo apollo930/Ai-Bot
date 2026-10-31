@@ -62,6 +62,15 @@ def test_board_and_totals_leave_out_channels_the_asker_cannot_read(bot_closures,
         assert i.response.deferred  # thread 4 had to be looked up first
         assert "<@10> — **1** · 😂" in board.description and "<@30> — **1** · 🔥" in board.description
         assert "only channels you can read" in board.footer.text
+        sent = asking()
+        await bot["reaction_board"].callback(sent, sort="sent")
+        sent_board = sent.response.kwargs["embed"]
+        assert "<@20> — **2** · 🔥" in sent_board.description
+        assert "<@21>" not in sent_board.description  # only reacted in the hidden channel
+        assert "❤️" not in sent_board.description
+        filtered = asking()
+        await bot["reaction_board"].callback(filtered, emoji="❤", sort="sent")
+        assert "No reactions counted" in filtered.response.kwargs["embed"].description
         j = asking()
         await bot["reaction_totals"].callback(j)
         report = j.response.kwargs["embed"]
@@ -98,3 +107,6 @@ def test_store_filters(tmp_path):
     assert tracker.store.summary(1, 10, channels=set())[0] == 0
     assert tracker.store.summary(1, 10)[0] == 3  # no filter: everything, as before
     assert [r[0] for r in tracker.store.leaderboard(1, channels={4})] == [30]
+    assert tracker.store.leaderboard(1, channels={2}, sort="sent") == [(20, 1, "😂")]
+    assert tracker.store.leaderboard(1, channels=set(), sort="sent") == []
+    assert tracker.store.leaderboard(1, emoji="❤", channels={3}, sort="sent") == [(20, 1, "❤️"), (21, 1, "❤️")]

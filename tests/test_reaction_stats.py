@@ -172,6 +172,25 @@ def test_channel_filter_scopes_totals_breakdown_top_message_and_emoji_board(tmp_
     assert store.leaderboard(1, channel_id=4) == []
 
 
+def test_sent_ranking_groups_reactors_and_preserves_filters_and_top_emoji(tmp_path):
+    store = ReactionStore(tmp_path / "links.db")
+    custom = "<:external:123>"
+    store.replace(1, 2, 100, 10, [(20, "unicode:❤️", "❤️"), (20, "unicode:😂", "😂"), (30, "unicode:❤️", "❤️")])
+    store.replace(1, 2, 101, 40, [(20, "custom:123", custom), (30, "unicode:❤️", "❤️"), (30, "custom:123", custom)])
+    store.replace(1, 3, 102, 10, [(30, "unicode:😂", "😂")])
+    store.replace(9, 2, 103, 50, [(20, "unicode:❤️", "❤️")])
+
+    assert store.leaderboard(1, sort="sent") == [(30, 4, "❤️"), (20, 3, custom)]
+    assert store.leaderboard(1, channel_id=2, sort="sent") == [(20, 3, custom), (30, 3, "❤️")]
+    assert store.leaderboard(1, "❤️", channel_id=2, sort="sent") == [(30, 2, "❤️"), (20, 1, "❤️")]
+    assert store.leaderboard(1, "<:renamed:123>", sort="sent") == [(20, 1, custom), (30, 1, custom)]
+    assert store.leaderboard(1, channel_id=3, sort="sent") == [(30, 1, "😂")]
+    assert store.leaderboard(1, channel_id=4, sort="sent") == []
+    assert [row[0] for row in store.leaderboard(1)] == [10, 40]
+    store.delete_messages([102])
+    assert store.leaderboard(1, sort="sent") == [(20, 3, custom), (30, 3, "❤️")]
+
+
 def test_snapshot_excludes_bots_and_self_and_unions_super_reactions(tmp_path):
     m = message(reactions=[Reaction("😂", [user(10), user(20), user(99, True)], [user(20), user(21)]),
                            Reaction("❤️", [user(20)])])
@@ -183,12 +202,15 @@ def test_snapshot_excludes_bots_and_self_and_unions_super_reactions(tmp_path):
         await tracker.on_reaction(payload)
         await tracker.on_reaction(payload)
         assert tracker.store.summary(1, 10)[0] == 3
+        assert tracker.store.leaderboard(1, sort="sent") == [(20, 2, "❤️"), (21, 1, "😂")]
         m.reactions = [Reaction("❤️", [user(20)])]
         await tracker.on_reaction(payload)
         assert tracker.store.summary(1, 10)[0] == 1
+        assert tracker.store.leaderboard(1, sort="sent") == [(20, 1, "❤️")]
         m.reactions = []
         await tracker.on_reaction(payload)
         assert tracker.store.summary(1, 10)[0] == 0
+        assert tracker.store.leaderboard(1, sort="sent") == []
 
     run(flow())
 
@@ -634,6 +656,41 @@ def test_most_reacted_message_is_hidden_without_channel_access(bot_closures, mon
             assert all(field.name != "Most-reacted message" for field in kwargs["embed"].fields)
 
     run(bot["reaction_totals"].callback(NS(guild_id=1, user=NS(id=10, display_name="VB"), response=Response())))
+
+
+def test_reaction_board_sent_choice_displays_givers_and_most_used_emoji(bot_closures, monkeypatch):
+    bot = bot_closures
+    monkeypatch.setattr(bot["client"], "get_channel", lambda cid: Channel(cid))
+    store = bot["reaction_tracker"].store
+    store.replace(1, 2, 100, 10, [(20, "unicode:❤️", "❤️"), (30, "unicode:😂", "😂")])
+    store.replace(1, 3, 101, 40, [(30, "unicode:❤️", "❤️")])
+
+    class Response:
+        async def send_message(self, **kwargs):
+            self.kwargs = kwargs
+
+    i = NS(guild_id=1, user=NS(id=10, display_name="VB"), response=Response())
+
+    async def flow():
+        await bot["reaction_board"].callback(i, sort="sent")
+        embed = i.response.kwargs["embed"]
+        assert "Sent" in embed.title and "Total sent · most-used emoji" in embed.description
+        assert "<@30> — **2** · ❤️" in embed.description
+        assert "<@20> — **1** · ❤️" in embed.description
+        assert "<@10>" not in embed.description and "<@40>" not in embed.description
+        assert not i.response.kwargs["allowed_mentions"].users
+        await bot["reaction_board"].callback(i, "😂", Channel(2), sort="sent")
+        embed = i.response.kwargs["embed"]
+        assert "<@30> — **1** · 😂" in embed.description
+        assert "<@20>" not in embed.description
+        assert embed.fields[0].value == "😂" and embed.fields[1].value == "<#2>"
+        await bot["reaction_board"].callback(i)
+        assert "Total received" in i.response.kwargs["embed"].description
+
+    run(flow())
+    option = bot["reaction_board"].get_parameter("sort")
+    assert option.default == "received"
+    assert [choice.value for choice in option.choices] == ["received", "sent"]
 
 
 def test_commands_combine_channel_and_emoji_filters_and_show_scope(bot_closures):

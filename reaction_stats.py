@@ -154,9 +154,12 @@ class ReactionStore:
         top = self.db.execute("SELECT m.channel_id, m.message_id, COUNT(*) " + where + " GROUP BY m.message_id ORDER BY COUNT(*) DESC, m.message_id DESC LIMIT 1", args).fetchone()
         return sum(count for _, count in breakdown), breakdown, top
 
-    def leaderboard(self, guild_id, emoji=None, channel_id=None, channels=None):
-        """Return (author, total, top emoji) within the selected filters; ties use emoji ID/key.
+    def leaderboard(self, guild_id, emoji=None, channel_id=None, channels=None, *, sort="received"):
+        """Return (person, total, top emoji), ranking authors or reacting users.
         channels, when given, limits the count to those channel/thread ids."""
+        if sort not in ("received", "sent"):
+            raise ValueError("sort must be received or sent")
+        person = "e.user_id" if sort == "sent" else "m.author_id"
         where = "WHERE m.guild_id = ?"
         args = [guild_id]
         if emoji is not None:
@@ -168,18 +171,18 @@ class ReactionStore:
         where += self._only_channels(channels, args)
         return self.db.execute(f"""
             WITH emoji_counts AS (
-                SELECT m.author_id, e.emoji_key, MAX(e.emoji_display) AS display, COUNT(*) AS n
+                SELECT {person} AS person_id, e.emoji_key, MAX(e.emoji_display) AS display, COUNT(*) AS n
                 FROM reaction_entries e JOIN reaction_messages m USING (message_id)
                 {where}
-                GROUP BY m.author_id, e.emoji_key
+                GROUP BY {person}, e.emoji_key
             ), ranked AS (
-                SELECT author_id, display,
-                    SUM(n) OVER (PARTITION BY author_id) AS total,
-                    ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY n DESC, emoji_key) AS priority
+                SELECT person_id, display,
+                    SUM(n) OVER (PARTITION BY person_id) AS total,
+                    ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY n DESC, emoji_key) AS priority
                 FROM emoji_counts
             )
-            SELECT author_id, total, display FROM ranked WHERE priority = 1
-            ORDER BY total DESC, author_id LIMIT 20
+            SELECT person_id, total, display FROM ranked WHERE priority = 1
+            ORDER BY total DESC, person_id LIMIT 20
         """, args).fetchall()
 
     def mark_alive(self, guild_ids, when):
