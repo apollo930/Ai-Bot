@@ -17,8 +17,9 @@ def add_scan_status(embed, tracker, guild_id):
 class ReactionReport(discord.ui.View):
     PAGE_SIZE = 8
 
-    def __init__(self, interaction, user, total, breakdown, channel, most_reacted, tracker):
+    def __init__(self, interaction, user, total, breakdown, channel, most_reacted, tracker, sent=None):
         super().__init__(timeout=300)
+        self.sent = sent  # (reactions given, top 5 emoji they use as (emoji, count)), or None
         self.interaction, self.user = interaction, user
         self.total, self.breakdown = total, breakdown
         self.channel, self.most_reacted, self.tracker = channel, most_reacted, tracker
@@ -42,6 +43,11 @@ class ReactionReport(discord.ui.View):
                             value="\n".join(f"{emoji}  **{count:,}**" for emoji, count in rows))
         else:
             embed.description += "\n\nNo reactions counted yet."
+        if self.sent is not None:
+            given, used = self.sent
+            embed.add_field(name="Reacts with most", inline=False, value=(
+                f"**{given:,}** reactions given\n" + "\n".join(f"{emoji}  **{count:,}**" for emoji, count in used)
+                if used else "No reactions given yet."))
         if self.most_reacted:
             url, count = self.most_reacted
             embed.add_field(name="Most-reacted message", inline=False,

@@ -30,7 +30,7 @@ Discord objects, without connecting or touching the network.
 | `;name` in a message | Same as `/ai name`: a message that's just `;name` (optionally `;name @someone`, or as a reply) is replaced by the reaction. |
 | `/listai` | List the saved reactions (only to you). 📎 = kept as a file; ⚠️ = its link died (links are checked daily). |
 | `/removeai <name>` | Delete a saved reaction (Manage Server). |
-| `/reactions [user] [channel]` | Reactions received on your messages (or another member's), with an emoji breakdown and a link to their most-reacted message if you can access it. Optionally limit results to one channel or thread. |
+| `/reactions [user] [channel]` | One person's report (you, or another member): reactions received on their messages with an emoji breakdown, a link to their most-reacted message if you can access it, and **Reacts with most**: how many reactions they've given and the 5 emoji they use most. Optionally limit results to one channel or thread. |
 | `/reactionboard [emoji] [channel] [sort]` | Rank by reactions received (default), or use `sort:sent` to rank reactions given. Each person's top emoji follows the same filters. Emoji filters accept Unicode emoji, custom emoji such as `<:name:123456789>`, or custom emoji IDs; ❤ and ❤️ (with or without the invisible emoji-style mark keyboards differ on) match the same reactions. |
 | `/reactionscan <limit> [channel] [all_channels]` | Administrators only: scan the last N messages, or `inf` for all history. Defaults to the current channel/thread. Set `all_channels:true` for the server; a numeric limit then applies separately to each channel/thread. |
 | `.hello` / `.hi` | Greeting |

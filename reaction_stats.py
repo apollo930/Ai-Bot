@@ -154,6 +154,22 @@ class ReactionStore:
         top = self.db.execute("SELECT m.channel_id, m.message_id, COUNT(*) " + where + " GROUP BY m.message_id ORDER BY COUNT(*) DESC, m.message_id DESC LIMIT 1", args).fetchone()
         return sum(count for _, count in breakdown), breakdown, top
 
+    def sent_summary(self, guild_id, user_id, channel_id=None, channels=None, top=5):
+        """(reactions user_id has given, their `top` most-used emoji as (emoji, count)), counting
+        the same saved reactions as everything else (people's messages, no self-reactions)."""
+        args = [guild_id, user_id]
+        where = "FROM reaction_entries e JOIN reaction_messages m USING (message_id) WHERE m.guild_id = ? AND e.user_id = ?"
+        if channel_id is not None:
+            where += " AND m.channel_id = ?"
+            args.append(channel_id)
+        where += self._only_channels(channels, args)
+        total = self.db.execute("SELECT COUNT(*) " + where, args).fetchone()[0]
+        # ❤ and ❤️ (with/without U+FE0F) are one emoji here, as in the emoji filter
+        used = self.db.execute("SELECT MAX(e.emoji_display), COUNT(*) " + where +
+                               " GROUP BY replace(e.emoji_key, char(65039), '') ORDER BY COUNT(*) DESC, MIN(e.emoji_key) LIMIT ?",
+                               [*args, top]).fetchall()
+        return total, used
+
     def leaderboard(self, guild_id, emoji=None, channel_id=None, channels=None, *, sort="received"):
         """Return (person, total, top emoji), ranking authors or reacting users.
         channels, when given, limits the count to those channel/thread ids."""

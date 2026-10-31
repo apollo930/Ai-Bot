@@ -946,7 +946,7 @@ def run_discord_bot():
 				amount += " per channel/thread"
 			await interaction.response.send_message(f"Started scanning {amount} in {scope}. Check /reactions or /reactionboard for progress. Older saved totals outside this range are kept.", ephemeral=True)
 
-		@tree.command(name="reactions", description="See reactions received on your or someone's messages")
+		@tree.command(name="reactions", description="Reactions someone received, and the 5 they use most")
 		@discord.app_commands.guild_only()
 		@discord.app_commands.describe(user="Whose reactions to show (defaults to you)", channel="Only this channel or thread (defaults to the whole server)")
 		async def reaction_totals(interaction: discord.Interaction, user: discord.Member = None, channel: ReactionChannel = None):
@@ -961,7 +961,8 @@ def run_discord_bot():
 				top_channel = channel or client.get_channel(channel_id)
 				if top_channel and (perms := top_channel.permissions_for(interaction.user)).view_channel and perms.read_message_history:
 					most_reacted = (f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}", count)
-			report = ReactionReport(interaction, user, total, breakdown, channel, most_reacted, reaction_tracker)
+			sent = reaction_tracker.store.sent_summary(interaction.guild_id, user.id, channel.id if channel else None, readable)
+			report = ReactionReport(interaction, user, total, breakdown, channel, most_reacted, reaction_tracker, sent)
 			await send(embed=report.embed(), view=report if report.pages > 1 else None,
 				allowed_mentions=discord.AllowedMentions.none())
 
