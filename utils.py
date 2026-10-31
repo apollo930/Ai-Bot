@@ -421,6 +421,35 @@ def download_link(url: str, media: str | None, x_host: str, instafix: str, via: 
     return None
 
 
+def _same_url(a: str, b: str) -> bool:
+    pa, pb = urllib.parse.urlparse(a or ""), urllib.parse.urlparse(b or "")
+    return (pa.netloc.lower(), pa.path.rstrip("/"), pa.query) == (pb.netloc.lower(), pb.path.rstrip("/"), pb.query)
+
+
+def preview_ok(link: str, embeds: list[dict], only_link: bool = False) -> bool:
+    """True if Discord made a working preview for link, given the message's embeds (as dicts).
+    Instagram's login page doesn't count: that's what a fixer's redirect to instagram.com gives.
+    With only_link (one previewed link in the message), an embed whose URL differs still counts."""
+    for e in embeds:
+        if not (_same_url(e.get("url", ""), link) or only_link):
+            continue
+        provider = (e.get("provider") or {}).get("name") or ""
+        if provider == "Instagram" or (e.get("title") or "").startswith("Login • Instagram"):
+            return False
+        return True
+    return False
+
+
+def recrawl_url(url: str) -> str:
+    """url with a retry marker (r=1, r=2, ...), so Discord sees a new link and fetches it again.
+    Fixers ignore the extra query parameter."""
+    parsed = urllib.parse.urlparse(url)
+    params = [(k, v) for k, v in urllib.parse.parse_qsl(parsed.query) if k != "r"]
+    tries = next((int(v) for k, v in urllib.parse.parse_qsl(parsed.query) if k == "r" and v.isdigit()), 0)
+    params.append(("r", str(tries + 1)))
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(params)))
+
+
 def link_key(url: str) -> str:
     """Same key for every link to one post (x.com and twitter.com, tracking params, www.)."""
     status = x_status(url)

@@ -192,3 +192,22 @@ def test_reddit_post_kinds_and_only_rule():
     assert utils.fixer_only_for({"domain": "reddit.com", "replacement": "vxreddit.com"}) == {"video", "gallery"}
     assert utils.fixer_only_for({"domain": "www.reddit.com", "replacement": "vxreddit.com"}) == {"video", "gallery"}
     assert utils.fixer_only_for({"domain": "instagram.com", "replacement": "ig.example"}) is None
+
+
+def test_preview_ok():
+    link = "https://ig.reaper113.xyz/reel/AbC/"
+    good = {"type": "video", "url": "https://ig.reaper113.xyz/reel/AbC/", "provider": {"name": "InstaFix"}}
+    login = {"type": "article", "url": "https://ig.reaper113.xyz/reel/AbC/", "provider": {"name": "Instagram"}}
+    other = {"type": "rich", "url": "https://fixupx.com/u/status/1"}
+    assert utils.preview_ok(link, [good])
+    assert utils.preview_ok("https://ig.reaper113.xyz/reel/AbC", [good])  # trailing slash doesn't matter
+    assert not utils.preview_ok(link, [login])
+    assert not utils.preview_ok(link, [])
+    assert not utils.preview_ok(link, [other])
+    assert utils.preview_ok(link, [other], only_link=True)
+
+
+def test_recrawl_url():
+    assert utils.recrawl_url("https://ig.reaper113.xyz/reel/AbC/") == "https://ig.reaper113.xyz/reel/AbC/?r=1"
+    assert utils.recrawl_url("https://ig.reaper113.xyz/p/AbC/?img_index=2") == "https://ig.reaper113.xyz/p/AbC/?img_index=2&r=1"
+    assert utils.recrawl_url("https://x.reaper113.xyz/u/status/1/en?r=1") == "https://x.reaper113.xyz/u/status/1/en?r=2"

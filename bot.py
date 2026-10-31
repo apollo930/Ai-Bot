@@ -29,6 +29,11 @@ REACTION_MAX_BYTES = 10 * 2**20  # Discord's upload limit in a server without bo
 REACTION_NAME_RE = re.compile(r"[\w-]{1,32}")
 REACTION_TRIGGER_RE = re.compile(r";([\w-]{1,32})(?:\s+(<@!?\d+>))?")  # ;name, optionally with one @mention
 FALLBACK_TIMEOUT = 60  # seconds yt-dlp gets to fetch a post's video when no fixer embeds it
+# Discord fetches each link's preview itself, and now and then gets nothing even though the check
+# before reposting passed (our fixers run on two machines and Discord may reach the other one, or a
+# first fetch is too slow). The repost is looked at again after EMBED_CHECK_AFTER seconds.
+EMBED_CHECK_AFTER = 8
+EMBED_RETRIES = 2  # 1: the same fixer again (a slightly different URL makes Discord refetch), 2: the next fixer
 DEAD_STATUSES = {404, 410, 451}  # gone for good (403 isn't: some sites refuse bots but work for people)
 
 
@@ -474,6 +479,70 @@ def run_discord_bot():
 			while len(fix_details) > DETAILS_KEPT:
 				fix_details.pop(next(iter(fix_details)))
 
+		async def next_fixer(url: str, rule: dict, current: str, steps: list) -> str | None:
+			"""After Discord showed no preview for current: the rule's next fixer that passes the
+			check, or for a site whose own embed works (Reddit) the original link. None if neither."""
+			hosts = utils.rule_hosts(rule)
+			host = utils.host_of(current)
+			for other in hosts[hosts.index(host) + 1:] if host in hosts else []:
+				candidate = utils.fix_url(url, rule, other)
+				problem = await embed_problem(candidate, {}, rule.get("domain"))
+				if problem is None:
+					steps.append(f"↻ switched to `{other}`")
+					return candidate
+				steps.append(f"✗ `{other}`: {problem}")
+			if utils.fixer_only_for(rule) is not None:
+				steps.append("↻ switched back to the original link (its own embed)")
+				return url
+			return None
+
+		async def watch_embeds(webhook, sent, watched: dict, rules: dict, steps: dict, thread):
+			"""Make sure Discord previewed the repost's fixed links. watched maps each original
+			link to the fixer URL in the repost. For one without a preview (or with Instagram's
+			login page, what a fixer's redirect gives), the URL is edited so Discord fetches it
+			again; if that fails too, the next fixer is used."""
+			content = sent.content
+			own = {e.url for e in sent.embeds}  # embeds the bot sent itself (a gallery's)
+			where = {"thread": thread} if thread else {}
+			for attempt in range(EMBED_RETRIES + 1):
+				await asyncio.sleep(EMBED_CHECK_AFTER)
+				try:
+					current = await webhook.fetch_message(sent.id, **where)
+				except discord.HTTPException:
+					return  # deleted, or Discord unreachable
+				if current.content != content:
+					return  # edited with "Edit repost": leave it alone
+				embeds = [e.to_dict() for e in current.embeds if e.url not in own]
+				missing = {u: f for u, f in watched.items() if not utils.preview_ok(f, embeds, len(watched) == 1)}
+				for url in watched.keys() - missing.keys():
+					if attempt:
+						steps[url].append("✓ Discord showed the preview this time")
+				if not missing:
+					return
+				if attempt == EMBED_RETRIES:
+					for url in missing:
+						steps[url].append("✗ Discord still showed no preview")
+					return
+				for url, fixed in missing.items():
+					if attempt == 0:
+						steps[url].append(f"↻ Discord showed no preview for `{utils.host_of(fixed)}` after {EMBED_CHECK_AFTER}s: asked it again")
+						new = utils.recrawl_url(fixed)
+					else:
+						new = await next_fixer(url, rules[url], fixed, steps[url])
+					if new:
+						content = content.replace(fixed, new)
+						watched[url] = new
+					else:
+						steps[url].append("✗ no other fixer works for it")
+						del watched[url]
+				if not watched:
+					return
+				try:
+					await webhook.edit_message(sent.id, content=content, **where)
+				except discord.HTTPException as e:
+					print(f"Couldn't edit repost {sent.id} for a new preview: {e}", flush=True)
+					return
+
 		async def repost_fixed(message, user_message, links, unique, limit, steps, music):
 			"""Repost with fixed links and buttons for song links. Returns (fixed_any, the repost or None)."""
 			results, songs = await asyncio.gather(
@@ -594,6 +663,12 @@ def run_discord_bot():
 				return True, None
 			seen_links.remember(message.guild.id, keys, sent.id, sent.jump_url, message.author.display_name)
 			repost_owners.add(sent.id, message.author.id)
+			# links Discord should preview: fixed ones shown openly (not <suppressed>, spoilered or a gallery's)
+			watched = {u: f for u, f in chosen.items() if not f.startswith("<") and u not in spoilered and u != gallery_url}
+			if watched:
+				task = asyncio.create_task(watch_embeds(webhook, sent, watched, unique, steps, kwargs.get("thread")))
+				watch_tasks.add(task)
+				task.add_done_callback(watch_tasks.discard)
 			return True, sent
 
 		@client.event
@@ -687,6 +762,7 @@ def run_discord_bot():
 		url_rules = []
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
+		watch_tasks = set()  # running watch_embeds checks (kept here so they aren't garbage-collected)
 		seen_links = utils.SeenLinks("links.db")
 		repost_owners = utils.RepostOwners("links.db")
 		app_emojis = {}  # name -> the bot's application emoji (button logos from emojis/)
