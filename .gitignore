@@ -2,4 +2,5 @@
 __pycache__/
 .serena/
 links.db
+links.db-*
 data/

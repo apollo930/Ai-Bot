@@ -28,8 +28,23 @@ Discord objects, without connecting or touching the network.
 | `;name` in a message | Same as `/ai name`: a message that's just `;name` (optionally `;name @someone`, or as a reply) is replaced by the reaction. |
 | `/listai` | List the saved reactions (only to you). 📎 = kept as a file; ⚠️ = its link died (links are checked daily). |
 | `/removeai <name>` | Delete a saved reaction (Manage Server). |
+| `/reactions [user] [channel]` | Reactions received on your messages (or another member's), with an emoji breakdown and a link to their most-reacted message if you can access it. Optionally limit results to one channel or thread. |
+| `/reactionboard [emoji] [channel]` | Server leaderboard by reactions received. Optionally filter by emoji, channel/thread, or both. Emoji filters accept Unicode emoji, custom emoji such as `<:name:123456789>`, or custom emoji IDs. |
+| `/reactionscan <limit> [channel] [all_channels]` | Administrators only: scan the last N messages, or `inf` for all history. Defaults to the current channel/thread. Set `all_channels:true` for the server; a numeric limit then applies separately to each channel/thread. |
 | `.hello` / `.hi` | Greeting |
 | `.inspire` / `.motivate` | Random quote |
+
+### Reaction totals
+
+- Counts reflect reactions currently on messages, across this server. Each person's different emojis count separately; a normal and super reaction with the same emoji from the same person count once. Bots and self-reactions are excluded, including the bot's own ⏳ and ⚠️ reactions.
+- Leave `channel` empty for server-wide results. Selecting a channel counts messages directly in that channel; select an individual thread to count its messages separately. For example, `/reactions user:@Alex channel:#general` or `/reactionboard emoji:😂 channel:#memes`. You must be able to view the selected channel/thread and read its history.
+- Reactions on the bot's link reposts and `/ai` posts credit the original person. Other bots and unrelated webhook posts do not receive credit.
+- Adds, removals, cleared reactions, and deleted messages update the counts live, including messages outside the bot's memory cache. Repeated events do not increase totals twice. Rankings show up to 20 people and never ping them.
+- History scans run **only when an administrator requests one**; startup, redeploys, and reconnects never trigger a history scan. Live tracking starts immediately using saved totals. Reactions changed while offline can remain stale until their messages are rescanned (or receive another live reaction event).
+- `/reactionscan limit:1000` scans the newest 1,000 messages in the current channel/thread. Add `channel:#memes` to choose another channel. `/reactionscan limit:inf` scans the current channel's entire history. Add `all_channels:true` to either command to scan all accessible channels and active/archived threads; numeric limits apply **per channel/thread**, not as a server-wide total. Selecting a single channel does not include its threads. `channel` and `all_channels:true` cannot be combined.
+- Scans run in the background; `/reactions` and `/reactionboard` show progress and the latest scan's scope and completion time. Only one scan can run at a time. Repeat scans refresh counts without duplicating them; limited scans retain older saved totals outside their inspected range. Full-history scans can take a while on a server with a long history. Cancelling the bot/redeploying interrupts a scan; it does not resume automatically.
+- The bot needs **View Channel** and **Read Message History** for channels being counted. Server-wide scans include public threads and joined private threads; with **Manage Threads**, the bot can also discover other private archived threads. Missing access or API errors appear in the command footer and logs. Previously recorded counts in unavailable channels are retained until they can be reconciled, so partial totals can be stale as well as incomplete. Discord cannot recover reactions on messages already deleted before the first scan.
+- Counts and scan status live in the existing, gitignored `links.db`. Tables are created automatically without changing existing repost/link records. On the Raspberry Pi, preserve this database across auto-pulls and redeploys; back it up alongside `config.json` and `data/`. No new dependencies, credentials, or environment variables are needed.
 
 ### Link reposts
 

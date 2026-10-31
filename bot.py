@@ -1,6 +1,9 @@
 import discord, os, utils, json, asyncio, time, aiohttp, io, glob, re, sys, tempfile
 from discord.ext import tasks
 from dotenv import load_dotenv
+from reaction_stats import ReactionTracker, parse_scan_limit
+
+ReactionChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
 async def send_message(message, user_message, is_private):
 	try:
@@ -47,10 +50,12 @@ def run_discord_bot():
 			nonlocal game_log_channel, url_rules, reactions
 			cpu_temp = utils.get_cpu_temp()
 			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
-			update_presence.start()
+			if not update_presence.is_running():
+				update_presence.start()
 			if not check_reactions.is_running():
 				check_reactions.start()
 			for guild in client.guilds:
+				reaction_tracker.note_gap(guild.id)
 				if guild.system_channel:
 					await guild.system_channel.send("Bot is online!")
 			try:
@@ -86,6 +91,11 @@ def run_discord_bot():
 				print(f"Slash command sync failed: {e}", flush=True)
 			await load_button_emojis()
 			print(f"{client.user} is ready!", flush=True)
+
+		@client.event
+		async def on_resumed():
+			for guild in client.guilds:
+				reaction_tracker.note_gap(guild.id)
 
 		async def load_button_emojis():
 			"""Logo emojis for the link buttons: emojis/*.png, uploaded once as the bot's own
@@ -612,8 +622,43 @@ def run_discord_bot():
 
 		@client.event
 		async def on_raw_message_delete(payload):
+			await reaction_tracker.delete_messages([payload.message_id])
 			seen_links.forget(payload.message_id)  # a deleted repost no longer counts as posted before
 			repost_owners.forget(payload.message_id)
+
+		@client.event
+		async def on_raw_bulk_message_delete(payload):
+			await reaction_tracker.delete_messages(payload.message_ids)
+			for message_id in payload.message_ids:
+				seen_links.forget(message_id)
+				repost_owners.forget(message_id)
+
+		@client.event
+		async def on_guild_channel_delete(channel):
+			await reaction_tracker.delete_channel(channel.id)
+			for thread in getattr(channel, "threads", []):
+				await reaction_tracker.delete_channel(thread.id)
+
+		@client.event
+		async def on_raw_thread_delete(payload):
+			await reaction_tracker.delete_channel(payload.thread_id)
+
+		# Raw events also cover messages outside Discord.py's in-memory message cache.
+		@client.event
+		async def on_raw_reaction_add(payload):
+			await reaction_tracker.on_reaction(payload)
+
+		@client.event
+		async def on_raw_reaction_remove(payload):
+			await reaction_tracker.on_reaction(payload)
+
+		@client.event
+		async def on_raw_reaction_clear(payload):
+			await reaction_tracker.on_reaction(payload)
+
+		@client.event
+		async def on_raw_reaction_clear_emoji(payload):
+			await reaction_tracker.on_reaction(payload)
 
 		@client.event
 		async def on_interaction(interaction: discord.Interaction):
@@ -711,6 +756,94 @@ def run_discord_bot():
 					if cid.startswith("dellink:"):
 						return int(cid.split(":", 1)[1])
 			return None
+
+		reaction_tracker = ReactionTracker(client, repost_owner)
+
+		async def check_reaction_channel(interaction, channel):
+			if channel is not None:
+				perms = channel.permissions_for(interaction.user)
+				if not perms.view_channel or not perms.read_message_history:
+					await interaction.response.send_message("Choose a channel or thread where you can read message history.", ephemeral=True)
+					return False
+			return True
+
+		@tree.command(name="reactionscan", description="Scan old messages for reaction totals (admins only)")
+		@discord.app_commands.guild_only()
+		@discord.app_commands.default_permissions(administrator=True)
+		@discord.app_commands.describe(limit="Last N messages, e.g. 1000, or inf for all history (per channel if server-wide)",
+			channel="Channel/thread to scan (defaults to the current channel)",
+			all_channels="Scan every accessible channel and thread instead of just one")
+		async def reaction_scan(interaction: discord.Interaction, limit: str, channel: ReactionChannel = None, all_channels: bool = False):
+			if not interaction.user.guild_permissions.administrator:
+				await interaction.response.send_message("Only server administrators can run reaction scans.", ephemeral=True)
+				return
+			try:
+				message_limit = parse_scan_limit(limit)
+			except ValueError as error:
+				await interaction.response.send_message(str(error), ephemeral=True)
+				return
+			if all_channels and channel is not None:
+				await interaction.response.send_message("Choose either a channel or all_channels, not both.", ephemeral=True)
+				return
+			selected = None if all_channels else channel or interaction.channel
+			if selected is None and not all_channels:
+				await interaction.response.send_message("Choose a channel or thread to scan.", ephemeral=True)
+				return
+			if selected is not None:
+				if not hasattr(selected, "history"):
+					await interaction.response.send_message("Choose a channel or thread with message history.", ephemeral=True)
+					return
+				if not await check_reaction_channel(interaction, selected):
+					return
+				perms = selected.permissions_for(interaction.guild.me)
+				if not perms.view_channel or not perms.read_message_history:
+					await interaction.response.send_message("I need View Channel and Read Message History there to scan it.", ephemeral=True)
+					return
+			if not reaction_tracker.start_scan(interaction.guild, message_limit, selected):
+				await interaction.response.send_message("A reaction scan is already running. Check /reactions for progress.", ephemeral=True)
+				return
+			scope = "every accessible channel/thread" if selected is None else selected.mention
+			amount = "all history" if message_limit is None else f"the last {message_limit:,} messages"
+			if all_channels and message_limit is not None:
+				amount += " per channel/thread"
+			await interaction.response.send_message(f"Started scanning {amount} in {scope}. Check /reactions or /reactionboard for progress. Older saved totals outside this range are kept.", ephemeral=True)
+
+		@tree.command(name="reactions", description="See reactions received on your or someone's messages")
+		@discord.app_commands.guild_only()
+		@discord.app_commands.describe(user="Whose reactions to show (defaults to you)", channel="Only this channel or thread (defaults to the whole server)")
+		async def reaction_totals(interaction: discord.Interaction, user: discord.Member = None, channel: ReactionChannel = None):
+			if not await check_reaction_channel(interaction, channel):
+				return
+			user = user or interaction.user
+			total, breakdown, top = reaction_tracker.store.summary(interaction.guild_id, user.id, channel.id if channel else None)
+			embed = discord.Embed(title=f"Reactions received by {user.display_name}", color=0x5865F2,
+				description=f"**{total:,}** reactions received\n\n" + (utils.fit_items(
+					[f"{emoji} **{count:,}**" for emoji, count in breakdown], 3500) if breakdown else "No reactions counted yet."))
+			if channel is not None:
+				embed.add_field(name="Channel filter", value=channel.mention)
+			if top:
+				channel_id, message_id, count = top
+				top_channel = channel or client.get_channel(channel_id)
+				if top_channel and (perms := top_channel.permissions_for(interaction.user)).view_channel and perms.read_message_history:
+					embed.add_field(name="Most-reacted message", value=f"[Jump to message](https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}) · {count:,} reactions")
+			embed.set_footer(text=reaction_tracker.status(interaction.guild_id) + " · bots and self-reactions excluded")
+			await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+		@tree.command(name="reactionboard", description="Rank people by reactions received")
+		@discord.app_commands.guild_only()
+		@discord.app_commands.describe(emoji="Optional emoji filter: Unicode emoji, custom emoji, or custom emoji ID", channel="Only this channel or thread (defaults to the whole server)")
+		async def reaction_board(interaction: discord.Interaction, emoji: str = None, channel: ReactionChannel = None):
+			if not await check_reaction_channel(interaction, channel):
+				return
+			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None)
+			embed = discord.Embed(title="Reaction leaderboard", color=0x5865F2,
+				description="\n".join(f"**{rank}.** <@{user_id}> — **{count:,}**" for rank, (user_id, count) in enumerate(rows, 1)) or "No reactions counted for this selection yet.")
+			if emoji:
+				embed.add_field(name="Emoji filter", value=emoji[:100])
+			if channel is not None:
+				embed.add_field(name="Channel filter", value=channel.mention)
+			embed.set_footer(text=reaction_tracker.status(interaction.guild_id) + " · bots and self-reactions excluded")
+			await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 		class EditRepost(discord.ui.Modal, title="Edit repost"):
 			def __init__(self, message: discord.Message):
