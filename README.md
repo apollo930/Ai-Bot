@@ -23,7 +23,8 @@ Discord objects, without connecting or touching the network.
 | `/setgamechannel` | Set channel for game activity announcements |
 | `/urlrule add <domain> <replacement> [drop]` | Rewrite links to an embed fixer. `replacement` can list several hosts, comma-separated (`ig.reaper113.xyz,kkinstagram.com`): each is checked in order and the first one that gives Discord an image/video wins. If none does, the message is left alone. |
 | `/urlrule remove` / `/urlrule list` | Manage the rules |
-| `/fixlinks [count]` | Recheck the latest `count` reposts in this channel (default 10, up to 50) and fix any link Discord didn't preview: the same steps as the automatic check below. Replies only to you. |
+| `/fixlinks [count]` | Recheck the latest `count` reposts in this channel (default 1, up to 50) and fix any link Discord didn't preview: the same steps as the automatic check below. Replies only to you. |
+| reply `fixlink` / right-click → Apps → Fix links | Fix just that message: a repost gets the same preview check, and a message the bot left alone (⚠️) is fixed again. The `fixlink` reply is removed and the result shows for 8 s. |
 | `/addai <name> [link] [file]` | Save a reaction (Manage Server). Upload the GIF/image/video itself and the bot keeps the file (up to 10 MB) in `data/reactions/`, so it never stops working; Discord file links, which expire after about a day, are kept as files the same way. Other links are checked before saving. |
 | `/ai <name> [target]` | Post a saved reaction as you (works in threads too). A link that has died is refused with a note to add it again. |
 | `;name` in a message | Same as `/ai name`: a message that's just `;name` (optionally `;name @someone`, or as a reply) is replaced by the reaction. |
