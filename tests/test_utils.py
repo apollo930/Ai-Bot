@@ -211,3 +211,16 @@ def test_recrawl_url():
     assert utils.recrawl_url("https://ig.reaper113.xyz/reel/AbC/") == "https://ig.reaper113.xyz/reel/AbC/?r=1"
     assert utils.recrawl_url("https://ig.reaper113.xyz/p/AbC/?img_index=2") == "https://ig.reaper113.xyz/p/AbC/?img_index=2&r=1"
     assert utils.recrawl_url("https://x.reaper113.xyz/u/status/1/en?r=1") == "https://x.reaper113.xyz/u/status/1/en?r=2"
+
+
+def test_fixer_links():
+    rules = [
+        {"domain": "instagram.com", "replacement": ["ig.reaper113.xyz", "kkinstagram.com"]},
+        {"domain": "x.com", "replacement": ["fixupx.com", "x.reaper113.xyz"]},
+    ]
+    text = ("look https://ig.reaper113.xyz/reel/AbC/?r=1 and <https://fixupx.com/u/status/1> "
+            "||https://x.reaper113.xyz/u/status/2|| https://x.reaper113.xyz/u/status/3/en https://example.com/a")
+    assert utils.fixer_links(text, rules) == [
+        ("https://ig.reaper113.xyz/reel/AbC/?r=1", rules[0], "https://instagram.com/reel/AbC/"),
+        ("https://x.reaper113.xyz/u/status/3/en", rules[1], "https://x.com/u/status/3/en"),
+    ]

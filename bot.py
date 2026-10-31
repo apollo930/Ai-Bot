@@ -34,6 +34,8 @@ FALLBACK_TIMEOUT = 60  # seconds yt-dlp gets to fetch a post's video when no fix
 # first fetch is too slow). The repost is looked at again after EMBED_CHECK_AFTER seconds.
 EMBED_CHECK_AFTER = 8
 EMBED_RETRIES = 2  # 1: the same fixer again (a slightly different URL makes Discord refetch), 2: the next fixer
+FIXLINKS_SCAN = 300  # /fixlinks looks this many messages back for reposts
+OWN_EMBED_HOSTS = {"www.instagram.com", "instagram.com", "x.com"}  # urls of embeds the bot attaches itself (galleries)
 DEAD_STATUSES = {404, 410, 451}  # gone for good (403 isn't: some sites refuse bots but work for people)
 
 
@@ -496,33 +498,36 @@ def run_discord_bot():
 				return url
 			return None
 
-		async def watch_embeds(webhook, sent, watched: dict, rules: dict, steps: dict, thread):
+		async def watch_embeds(webhook, sent, watched: dict, rules: dict, steps: dict, thread,
+				first_wait: float | None = None, own: set | None = None) -> str:
 			"""Make sure Discord previewed the repost's fixed links. watched maps each original
 			link to the fixer URL in the repost. For one without a preview (or with Instagram's
 			login page, what a fixer's redirect gives), the URL is edited so Discord fetches it
-			again; if that fails too, the next fixer is used."""
+			again; if that fails too, the next fixer is used.
+			Returns "fine" (previewed at the first look), "fixed", "failed" or "skipped" (deleted or
+			edited meanwhile). own: URLs of embeds the bot attached itself (a gallery's)."""
 			content = sent.content
-			own = {e.url for e in sent.embeds}  # embeds the bot sent itself (a gallery's)
+			own = {e.url for e in sent.embeds} if own is None else own
 			where = {"thread": thread} if thread else {}
 			for attempt in range(EMBED_RETRIES + 1):
-				await asyncio.sleep(EMBED_CHECK_AFTER)
+				await asyncio.sleep(EMBED_CHECK_AFTER if attempt or first_wait is None else first_wait)
 				try:
 					current = await webhook.fetch_message(sent.id, **where)
 				except discord.HTTPException:
-					return  # deleted, or Discord unreachable
+					return "skipped"  # deleted, or Discord unreachable
 				if current.content != content:
-					return  # edited with "Edit repost": leave it alone
+					return "skipped"  # edited with "Edit repost": leave it alone
 				embeds = [e.to_dict() for e in current.embeds if e.url not in own]
 				missing = {u: f for u, f in watched.items() if not utils.preview_ok(f, embeds, len(watched) == 1)}
 				for url in watched.keys() - missing.keys():
 					if attempt:
 						steps[url].append("✓ Discord showed the preview this time")
 				if not missing:
-					return
+					return "fixed" if attempt else "fine"
 				if attempt == EMBED_RETRIES:
 					for url in missing:
 						steps[url].append("✗ Discord still showed no preview")
-					return
+					return "failed"
 				for url, fixed in missing.items():
 					if attempt == 0:
 						steps[url].append(f"↻ Discord showed no preview for `{utils.host_of(fixed)}` after {EMBED_CHECK_AFTER}s: asked it again")
@@ -536,12 +541,13 @@ def run_discord_bot():
 						steps[url].append("✗ no other fixer works for it")
 						del watched[url]
 				if not watched:
-					return
+					return "failed"
 				try:
 					await webhook.edit_message(sent.id, content=content, **where)
 				except discord.HTTPException as e:
 					print(f"Couldn't edit repost {sent.id} for a new preview: {e}", flush=True)
-					return
+					return "skipped"
+			return "failed"
 
 		async def repost_fixed(message, user_message, links, unique, limit, steps, music):
 			"""Repost with fixed links and buttons for song links. Returns (fixed_any, the repost or None)."""
@@ -942,6 +948,54 @@ def run_discord_bot():
 					await interaction.response.send_message(f"Couldn't edit it: {e.text or e.status}", ephemeral=True)
 					return
 				await interaction.response.send_message("✏️ Edited.", ephemeral=True)
+
+		@tree.command(name="fixlinks", description="Recheck my latest reposts here and fix links Discord didn't preview")
+		@discord.app_commands.describe(count="How many of the latest reposts in this channel to check (1-50)")
+		async def fixlinks(interaction: discord.Interaction, count: discord.app_commands.Range[int, 1, 50] = 10):
+			channel = interaction.channel
+			thread = channel if isinstance(channel, discord.Thread) else None
+			await interaction.response.defer(ephemeral=True, thinking=True)
+			try:
+				webhook = discord.utils.get(await (thread.parent if thread else channel).webhooks(), name="IG Cleaner")
+			except (discord.HTTPException, AttributeError):
+				webhook = None
+			reposts = []
+			if webhook:
+				async for message in channel.history(limit=FIXLINKS_SCAN):
+					if message.webhook_id != webhook.id:
+						continue
+					links = utils.fixer_links(message.content, url_rules)
+					if links:
+						reposts.append((message, links))
+						if len(reposts) >= count:
+							break
+			if not reposts:
+				await interaction.followup.send(f"No reposts of mine with previewed links in the last {FIXLINKS_SCAN} messages here.", ephemeral=True)
+				return
+			slots = asyncio.Semaphore(3)  # a few at a time: edits in one channel share a rate limit
+
+			async def check(message, links):
+				async with slots:
+					steps = fix_details.get(message.id) or {}
+					watched, rules = {}, {}
+					for fixed, rule, original in links:
+						steps.setdefault(original, []).append("🔎 /fixlinks: checked again")
+						watched[original], rules[original] = fixed, rule
+					own = {e.url for e in message.embeds if e.url and utils.host_of(e.url) in OWN_EMBED_HOSTS}
+					result = await watch_embeds(webhook, message, watched, rules, steps, thread, first_wait=0, own=own)
+					remember_details(steps, message.id)
+					return result
+
+			results = await asyncio.gather(*(check(m, links) for m, links in reposts))
+			counts = {r: results.count(r) for r in ("fine", "fixed", "failed", "skipped")}
+			lines = [f"Checked the last {len(reposts)} reposts here: {counts['fine']} fine, {counts['fixed']} fixed."]
+			failed = [m.jump_url for (m, _l), r in zip(reposts, results) if r == "failed"]
+			if failed:
+				lines.append(f"Still no preview ({len(failed)}): " + " ".join(f"[link](<{u}>)" for u in failed[:10]))
+				lines.append("-# Right-click one → Apps → Embed details shows what was tried.")
+			if counts["skipped"]:
+				lines.append(f"-# {counts['skipped']} skipped (deleted or edited meanwhile).")
+			await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
 		@tree.context_menu(name="Edit repost")
 		async def edit_repost(interaction: discord.Interaction, message: discord.Message):

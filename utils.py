@@ -71,6 +71,25 @@ def find_links(text: str, rules: list[dict]) -> list[tuple[int, int, str, dict]]
     return found
 
 
+def fixer_links(text: str, rules: list[dict]) -> list[tuple[str, dict, str]]:
+    """Fixer links shown openly in one of our reposts, as (fixer URL, rule, original link).
+    Leaves out <suppressed> and spoilered links (Discord previews neither). The original is
+    the fixer URL moved back onto the rule's own site, without our retry marker (r=)."""
+    found = []
+    for start, _end, url, _rule in find_links(text, [{"domain": h} for r in rules for h in rule_hosts(r)]):
+        if in_spoiler(text, start):
+            continue
+        host = urllib.parse.urlparse(url).hostname or ""
+        rule = next((r for r in rules if any(matches_domain(host, h) for h in rule_hosts(r))), None)
+        if rule is None:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(parsed.query) if k != "r"])
+        original = urllib.parse.urlunparse(parsed._replace(netloc=rule["domain"], query=query))
+        found.append((url, rule, original))
+    return found
+
+
 def spoiler_spans(text: str) -> list[tuple[int, int]]:
     """(start, end) of each ||spoiler|| in text, as Discord pairs the bars: first with second,
     third with fourth. Bars inside code spans don't count."""
