@@ -71,6 +71,14 @@ class ReactionStore:
 
     def replace(self, guild_id, channel_id, message_id, author_id, entries):
         """Replace one complete snapshot atomically; retries never add duplicate votes."""
+        entries = set(entries)
+        previous = self.db.execute("SELECT guild_id, channel_id, author_id FROM reaction_messages WHERE message_id = ?", (message_id,)).fetchone()
+        if not entries and previous is None:
+            return
+        if previous == (guild_id, channel_id, author_id):
+            saved = set(self.db.execute("SELECT user_id, emoji_key, emoji_display FROM reaction_entries WHERE message_id = ?", (message_id,)))
+            if saved == entries:
+                return  # repeated scans/events need no disk write when the snapshot is unchanged
         with self.db:
             self.db.execute("DELETE FROM reaction_messages WHERE message_id = ?", (message_id,))
             if not entries:
@@ -104,16 +112,30 @@ class ReactionStore:
         return sum(count for _, count in breakdown), breakdown, top
 
     def leaderboard(self, guild_id, emoji=None, channel_id=None):
-        sql = """SELECT m.author_id, COUNT(*) FROM reaction_entries e
-                 JOIN reaction_messages m USING (message_id) WHERE m.guild_id = ?"""
+        """Return (author, total, top emoji) within the selected filters; ties use emoji ID/key."""
+        where = "WHERE m.guild_id = ?"
         args = [guild_id]
         if emoji is not None:
-            sql += " AND e.emoji_key = ?"
+            where += " AND e.emoji_key = ?"
             args.append(emoji_key(emoji))
         if channel_id is not None:
-            sql += " AND m.channel_id = ?"
+            where += " AND m.channel_id = ?"
             args.append(channel_id)
-        return self.db.execute(sql + " GROUP BY m.author_id ORDER BY COUNT(*) DESC, m.author_id LIMIT 20", args).fetchall()
+        return self.db.execute(f"""
+            WITH emoji_counts AS (
+                SELECT m.author_id, e.emoji_key, MAX(e.emoji_display) AS display, COUNT(*) AS n
+                FROM reaction_entries e JOIN reaction_messages m USING (message_id)
+                {where}
+                GROUP BY m.author_id, e.emoji_key
+            ), ranked AS (
+                SELECT author_id, display,
+                    SUM(n) OVER (PARTITION BY author_id) AS total,
+                    ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY n DESC, emoji_key) AS priority
+                FROM emoji_counts
+            )
+            SELECT author_id, total, display FROM ranked WHERE priority = 1
+            ORDER BY total DESC, author_id LIMIT 20
+        """, args).fetchall()
 
     def finish_scan(self, guild_id, problems, channel_id=None, limit=None, checked=0):
         with self.db:
@@ -133,11 +155,18 @@ class ReactionTracker:
         self.live_errors = {}
         self.needs_scan = {}
         self.scope = None
+        self._scan_changed = None
+        self._scan_deleted_channels = None
 
-    async def sync_message(self, channel, message_id):
+    async def sync_message(self, channel, message_id, *, snapshot=None):
         async with self.lock:
             try:
-                message = await channel.fetch_message(message_id)
+                if self._scan_deleted_channels is not None and channel.id in self._scan_deleted_channels:
+                    return
+                # History already contains the author and reactions. Only fetch again if a live
+                # event/deletion may have made that history snapshot stale while the scan ran.
+                changed = self._scan_changed is not None and message_id in self._scan_changed
+                message = snapshot if snapshot is not None and not changed else await channel.fetch_message(message_id)
                 if not message.guild:
                     return
                 if message.webhook_id:
@@ -162,6 +191,8 @@ class ReactionTracker:
     async def on_reaction(self, payload):
         if not payload.guild_id:
             return
+        if self._scan_changed is not None:
+            self._scan_changed.add(payload.message_id)
         try:
             channel = self.client.get_channel(payload.channel_id) or await self.client.fetch_channel(payload.channel_id)
             await self.sync_message(channel, payload.message_id)
@@ -172,10 +203,15 @@ class ReactionTracker:
             log.warning("Could not reconcile reactions on message %s", payload.message_id, exc_info=True)
 
     async def delete_messages(self, message_ids):
+        message_ids = list(message_ids)
+        if self._scan_changed is not None:
+            self._scan_changed.update(message_ids)
         async with self.lock:
             self.store.delete_messages(message_ids)
 
     async def delete_channel(self, channel_id):
+        if self._scan_deleted_channels is not None:
+            self._scan_deleted_channels.add(channel_id)
         async with self.lock:
             self.store.delete_channel(channel_id)
 
@@ -188,6 +224,7 @@ class ReactionTracker:
             return False
         self.progress[guild.id] = 0
         self.scope = (channel.id if channel else None, limit)
+        self._scan_changed, self._scan_deleted_channels = set(), set()
         self.task = asyncio.create_task(self._scan(guild, limit, channel), name="reaction-history")
         return True
 
@@ -228,7 +265,7 @@ class ReactionTracker:
             known = message.id in missing
             missing.discard(message.id)
             if message.reactions or known:
-                await self.sync_message(channel, message.id)
+                await self.sync_message(channel, message.id, snapshot=message)
             self.progress[guild_id] += 1
             await asyncio.sleep(0)  # long histories must not block live events or commands
         if limit is not None and checked >= limit:
@@ -318,5 +355,6 @@ class ReactionTracker:
         finally:
             checked = self.progress.pop(guild.id, 0)
             self.scope = None
+            self._scan_changed = self._scan_deleted_channels = None
             if finished:
                 self.store.finish_scan(guild.id, problems, channel.id if channel else None, limit, checked)

@@ -835,7 +835,9 @@ def run_discord_bot():
 				return
 			rows = reaction_tracker.store.leaderboard(interaction.guild_id, emoji, channel.id if channel else None)
 			embed = discord.Embed(title="Reaction leaderboard", color=0x5865F2,
-				description="\n".join(f"**{rank}.** <@{user_id}> — **{count:,}**" for rank, (user_id, count) in enumerate(rows, 1)) or "No reactions counted for this selection yet.")
+				description=("Total received · top emoji\n\n" + "\n".join(
+					f"**{rank}.** <@{user_id}> — **{count:,}** · {top_emoji}"
+					for rank, (user_id, count, top_emoji) in enumerate(rows, 1))) if rows else "No reactions counted for this selection yet.")
 			if emoji:
 				embed.add_field(name="Emoji filter", value=emoji[:100])
 			if channel is not None:

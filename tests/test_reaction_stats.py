@@ -132,13 +132,27 @@ def test_store_persists_scopes_by_guild_and_filters_renamed_custom_emoji(tmp_pat
     store = ReactionStore(path)
     assert store.summary(1, 10)[0] == 2
     assert store.summary(1, 30)[0] == 0
-    assert store.leaderboard(1) == [(10, 2)]
-    assert store.leaderboard(1, "❤️") == [(10, 1)]
+    assert store.leaderboard(1) == [(10, 2, "<:old:123>")]
+    assert store.leaderboard(1, "❤️") == [(10, 1, "❤️")]
     for emoji in ("<:new:123>", "<a:new:123>", "123", NS(id=123)):
         assert emoji_key(emoji) == "custom:123"
-        assert store.leaderboard(1, emoji) == [(10, 1)]
+        assert store.leaderboard(1, emoji) == [(10, 1, "<:old:123>")]
     assert store.leaderboard(1, "😂") == []
     assert store.summary(1, 10)[2] == (2, 100, 2)
+
+
+def test_unchanged_snapshot_does_not_write_database_again(tmp_path):
+    store = ReactionStore(tmp_path / "links.db")
+    entries = [(20, "unicode:❤️", "❤️")]
+    store.replace(1, 2, 100, 10, entries)
+    changes = store.db.total_changes
+    store.replace(1, 2, 100, 10, entries + entries)
+    assert store.db.total_changes == changes
+    store.replace(1, 2, 100, 10, entries + [(21, "unicode:😂", "😂")])
+    assert store.summary(1, 10)[0] == 2
+    assert store.db.total_changes > changes
+    store.replace(1, 2, 100, 10, [])
+    assert store.summary(1, 10)[0] == 0
 
 
 def test_channel_filter_scopes_totals_breakdown_top_message_and_emoji_board(tmp_path):
@@ -151,10 +165,10 @@ def test_channel_filter_scopes_totals_breakdown_top_message_and_emoji_board(tmp_
     assert store.summary(1, 10)[0] == 3
     assert store.summary(1, 10, channel_id=3) == (1, [("😂", 1)], (3, 101, 1))
     assert store.summary(1, 10, channel_id=4) == (0, [], None)
-    assert store.leaderboard(1) == [(10, 3), (30, 2)]
-    assert store.leaderboard(1, channel_id=3) == [(30, 2), (10, 1)]
-    assert store.leaderboard(1, "😂", channel_id=3) == [(10, 1)]
-    assert store.leaderboard(1, "❤️", channel_id=3) == [(30, 2)]
+    assert store.leaderboard(1) == [(10, 3, "😂"), (30, 2, "❤️")]
+    assert store.leaderboard(1, channel_id=3) == [(30, 2, "❤️"), (10, 1, "😂")]
+    assert store.leaderboard(1, "😂", channel_id=3) == [(10, 1, "😂")]
+    assert store.leaderboard(1, "❤️", channel_id=3) == [(30, 2, "❤️")]
     assert store.leaderboard(1, channel_id=4) == []
 
 
@@ -196,7 +210,7 @@ def test_webhook_ownership_survives_owner_table_pruning_and_ignores_other_bots(t
         channel.messages[102] = message(102, user(99, True), m.reactions)
         await tracker.sync_message(channel, 101)
         await tracker.sync_message(channel, 102)
-        assert tracker.store.leaderboard(1) == [(10, 1)]
+        assert tracker.store.leaderboard(1) == [(10, 1, "❤️")]
 
     run(flow())
 
@@ -290,6 +304,69 @@ def test_history_reconciles_offline_changes_deletions_and_archived_threads(tmp_p
         assert tracker.store.message_ids(50) == set()  # channel deleted offline
         assert 104 not in channel.fetched  # no API fetch for unreacted, unknown messages
         assert "live updates enabled" in tracker.status(1)
+
+    run(flow())
+
+
+def test_scan_reuses_history_without_individual_message_fetches(tmp_path):
+    channel = Channel(2, [message(100 + i, reactions=[Reaction("❤️", [user(20)])]) for i in range(80)])
+    tracker = ReactionTracker(Client(channels=[channel]), lambda m: None, tmp_path / "links.db")
+
+    async def flow():
+        tracker.start_scan(guild([channel]), channel=channel)
+        await tracker.task
+        assert tracker.store.summary(1, 10)[0] == 80
+        assert channel.fetched == []  # previously this scan made 80 redundant message requests
+
+    run(flow())
+
+
+def test_live_event_processed_before_stale_history_cannot_be_overwritten(tmp_path):
+    stale = message(100, reactions=[Reaction("❤️", [user(20)])])
+    current = message(100, reactions=[Reaction("😂", [user(21)])])
+
+    class ChangingChannel(Channel):
+        async def history(self, **kwargs):
+            # A history page was fetched, then a live update completed before we visited its message.
+            self.messages[100] = current
+            await tracker.on_reaction(NS(guild_id=1, channel_id=2, message_id=100))
+            yield stale
+
+    channel = ChangingChannel(2, [stale])
+    tracker = ReactionTracker(Client(channels=[channel]), lambda m: None, tmp_path / "links.db")
+
+    async def flow():
+        tracker.start_scan(guild([channel]), channel=channel)
+        await tracker.task
+        assert tracker.store.summary(1, 10)[:2] == (1, [("😂", 1)])
+        assert channel.fetched == [100, 100]  # live event + fresh fetch for the changed snapshot
+
+    run(flow())
+
+
+@pytest.mark.parametrize("delete_channel", [False, True])
+def test_deletions_before_stale_history_do_not_resurrect_counts(tmp_path, delete_channel):
+    stale = message(100, reactions=[Reaction("❤️", [user(20)])])
+
+    class DeletingChannel(Channel):
+        async def history(self, **kwargs):
+            self.messages.clear()
+            if delete_channel:
+                await tracker.delete_channel(self.id)
+            else:
+                await tracker.delete_messages([100])
+            yield stale
+
+    channel = DeletingChannel(2, [stale])
+    tracker = ReactionTracker(Client(channels=[channel]), lambda m: None, tmp_path / "links.db")
+    tracker.store.replace(1, 2, 100, 10, [(20, "unicode:❤️", "❤️")])
+
+    async def flow():
+        tracker.start_scan(guild([channel]), channel=channel)
+        await tracker.task
+        assert tracker.store.summary(1, 10)[0] == 0
+        assert tracker._scan_changed is None
+        assert tracker._scan_deleted_channels is None
 
     run(flow())
 
@@ -456,7 +533,8 @@ def test_live_message_added_during_scan_is_not_pruned(tmp_path):
     run(flow())
 
 
-def test_live_removal_during_history_fetch_cannot_be_overwritten(tmp_path):
+@pytest.mark.parametrize("from_history", [False, True])
+def test_live_removal_during_history_fetch_cannot_be_overwritten(tmp_path, from_history):
     async def flow():
         started, release = asyncio.Event(), asyncio.Event()
 
@@ -469,7 +547,11 @@ def test_live_removal_during_history_fetch_cannot_be_overwritten(tmp_path):
         m = message(reactions=[SlowReaction("❤️", [user(20)])])
         channel = Channel(2, [m])
         tracker = ReactionTracker(Client(channels=[channel]), lambda m: None, tmp_path / "links.db")
-        scan = asyncio.create_task(tracker.sync_message(channel, 100))
+        if from_history:
+            tracker.start_scan(guild([channel]), channel=channel)
+            scan = tracker.task
+        else:
+            scan = asyncio.create_task(tracker.sync_message(channel, 100))
         await started.wait()
         m.reactions = []
         event = asyncio.create_task(tracker.on_reaction(NS(guild_id=1, channel_id=2, message_id=100)))
@@ -507,6 +589,8 @@ def test_commands_and_raw_event_registration(bot_closures, monkeypatch):
         await bot["reaction_board"].callback(i, "❤️")
         embed = i.response.kwargs["embed"]
         assert "<@10>" in embed.description and "<@30>" in embed.description
+        assert "<@10> — **1** · ❤️" in embed.description
+        assert "<@30> — **1** · ❤️" in embed.description
         assert "<@50>" not in embed.description
         assert "**2**" not in embed.description
 
@@ -576,6 +660,7 @@ def test_commands_combine_channel_and_emoji_filters_and_show_scope(bot_closures)
         await bot["reaction_board"].callback(i, "❤️", Channel(3))
         embed = i.response.kwargs["embed"]
         assert "<@30>" in embed.description and "<@10>" not in embed.description
+        assert "<@30> — **1** · ❤️" in embed.description
         assert embed.fields[0].value == "❤️" and embed.fields[1].value == "<#3>"
         await bot["reaction_board"].callback(i, channel=Channel(4))
         assert "No reactions counted" in i.response.kwargs["embed"].description
