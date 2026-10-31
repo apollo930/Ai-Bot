@@ -291,8 +291,9 @@ class ReactionTracker:
                 finally:
                     checked = self.progress.pop(guild.id, 0)
                     self.scope = None
-                log.info("Reaction catch-up in guild %s: %s messages since %s checked, %s problems",
-                         guild.id, checked, time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(after)), problems)
+                # print, like the bot's other status lines: discord.py only sets up its own logger
+                print(f"Reaction catch-up in guild {guild.id}: {checked} messages since "
+                      f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(after))} checked, {problems} problems", flush=True)
                 if not problems:
                     self.caught_up[guild.id] = int(time.time())
                     if self.needs_scan.get(guild.id, 0) == gap_before:
