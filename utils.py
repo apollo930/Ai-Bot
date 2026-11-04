@@ -176,16 +176,6 @@ def page_media(html: str) -> str | None:
     return "video" if card == "player" else "image" if card == "summary_large_image" else None
 
 
-def page_images(html: str) -> int:
-    """How many og:image tags a fixer page has (vxreddit lists every photo of a gallery)."""
-    count = 0
-    for tag in META_RE.findall(html or ""):
-        attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(tag)}
-        if (attrs.get("property") or attrs.get("name") or "").lower() == "og:image" and (attrs.get("content") or "").strip():
-            count += 1
-    return count
-
-
 def fixer_error(html: str) -> str | None:
     """The error a fixer page reports instead of a post, e.g. vxreddit's
     "Internal server error: HTTPError: HTTP Error 403: Forbidden" when Reddit blocks it."""
@@ -193,28 +183,21 @@ def fixer_error(html: str) -> str | None:
     return description if description.startswith("Internal server error") else None
 
 
-def post_kind(media: str | None, images: int) -> str | None:
-    """"video", "gallery", "image" or None (text/link post) from what a fixer page shows."""
-    if media == "video":
-        return "video"
-    if images >= 2:
-        return "gallery"
-    return media
+def has_text_embed(html: str) -> bool:
+    """True if a fixer page describes the post in text (a vxreddit text post has no image)."""
+    return bool(meta_content(html, "og:description") or meta_content(html, "og:site_name"))
 
 
-# Sites whose own Discord embed beats the fixer's, except for some kinds of post.
-# Reddit's own embed is a card Reddit draws (subreddit, title, votes, comments): the best
-# look for text, link and single-image posts. But its videos don't play and a gallery
-# shows only its first photo, so those go through the fixer (vxreddit: playable video
-# with sound, up to 4 photos). Everything else keeps the original link.
-FIXER_ONLY_FOR = {"reddit.com": {"video", "gallery"}}
+# Sites whose own Discord embed works without a fixer: Reddit draws a card for every post. Their
+# links still go through the fixer (vxreddit: playable videos, galleries, votes), where a page
+# that shows the post in text counts as working; but when no fixer can show a post, the original
+# link stays as it is (no ⚠️, no download attempt) and Discord shows its own card.
+OWN_EMBED_SITES = {"reddit.com"}
 KEEP_ORIGINAL = "original"
 
 
-def fixer_only_for(rule: dict) -> set[str] | None:
-    """The kinds of post a rule's fixer is used for, or None when it's used for every post."""
-    domain = (rule.get("domain") or "").lower().removeprefix("www.")
-    return FIXER_ONLY_FOR.get(domain)
+def own_embed_works(rule: dict) -> bool:
+    return (rule.get("domain") or "").lower().removeprefix("www.") in OWN_EMBED_SITES
 
 
 def x_status(url: str) -> tuple[str, str] | None:

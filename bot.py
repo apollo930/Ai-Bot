@@ -140,7 +140,7 @@ def run_discord_bot():
 					break
 			return bytes(body[:limit]).decode("utf-8", errors="replace")
 
-		async def embed_problem(url: str, page: dict | None = None, origin: str | None = None) -> str | None:
+		async def embed_problem(url: str, page: dict | None = None, origin: str | None = None, text_ok: bool = False) -> str | None:
 			"""None if Discord would get a media embed from this fixer URL, else what went wrong.
 			page, when given, gets the post's language as the fixer page states it (FxEmbed's <html lang>)
 			and what media the post has ("video", "image" or None, for the Download button).
@@ -170,8 +170,7 @@ def run_discord_bot():
 					if page is not None:
 						page["lang"] = utils.page_lang(html)
 						page["media"] = utils.page_media(html)
-						page["images"] = utils.page_images(html)
-					if utils.has_embed_media(html):
+					if utils.has_embed_media(html) or (text_ok and utils.has_text_embed(html)):
 						return None
 					return "no image/video in its page (post not found or blocked)"
 			except TimeoutError:
@@ -182,21 +181,13 @@ def run_discord_bot():
 
 		async def resolve(url: str, rule: dict, steps: list) -> tuple[str | None, str | None]:
 			"""(first fixer URL for url that embeds, its media kind), trying the rule's hosts in order.
-			(None, utils.KEEP_ORIGINAL) when the original link's own embed is the better one for this
-			post (see utils.FIXER_ONLY_FOR). Each attempt goes into steps, for "Apps → Embed details"."""
+			When none works on a site whose own embed works (Reddit, see utils.OWN_EMBED_SITES):
+			(None, utils.KEEP_ORIGINAL). Each attempt goes into steps, for "Apps → Embed details"."""
 			hit = fixed_cache.get(url)
 			if hit and time.time() - hit[0] < 600:
-				if hit[1] is None:
-					steps.append("✓ kept the original link: decided for this link in the last 10 min")
-				else:
-					steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
+				steps.append(f"✓ `{utils.host_of(hit[1])}`: worked for this link in the last 10 min, reused")
 				return hit[1], hit[2]
-			only = utils.fixer_only_for(rule)
-
-			def remember(fixed, media):
-				if len(fixed_cache) > 500:
-					fixed_cache.clear()
-				fixed_cache[url] = (time.time(), fixed, media)
+			text_ok = utils.own_embed_works(rule)
 			candidates = [(host, utils.fix_url(url, rule, host), "") for host in utils.rule_hosts(rule)]
 			checked, pages = {}, {}
 			if utils.x_status(url) and candidates:
@@ -204,32 +195,27 @@ def run_discord_bot():
 				# there first. FxEmbed fixers (fixupx, ours) state the post's language in their page.
 				first = candidates[0][1]
 				pages[first] = {}
-				checked[first] = await embed_problem(first, pages[first], rule.get("domain"))
+				checked[first] = await embed_problem(first, pages[first], rule.get("domain"), text_ok)
 				lang = pages[first].get("lang")
 				if utils.needs_translation(lang):
 					candidates.insert(0, (FXEMBED_HOST, utils.translated_x_url(url, FXEMBED_HOST), f", translated from `{lang}`"))
 			for host, candidate, note in candidates:
 				if candidate not in checked:
 					pages[candidate] = {}
-					checked[candidate] = await embed_problem(candidate, pages[candidate], rule.get("domain"))
+					checked[candidate] = await embed_problem(candidate, pages[candidate], rule.get("domain"), text_ok)
 				problem = checked[candidate]
-				# a page that loaded but shows no media is a text post on vxreddit, not a failure
-				if only is not None and (problem is None or "media" in pages[candidate]):
-					kind = utils.post_kind(pages[candidate].get("media"), pages[candidate].get("images", 0))
-					if kind not in only:
-						steps.append(f"✓ kept the original link: its own embed is better for this {kind or 'text/link'} post (`{host}` is only used for {' and '.join(sorted(only))})")
-						remember(None, utils.KEEP_ORIGINAL)
-						return None, utils.KEEP_ORIGINAL
 				if problem is None:
 					steps.append(f"✓ `{host}`: used{note}")
 					media = pages[candidate].get("media")
-					remember(candidate, media)
+					if len(fixed_cache) > 500:
+						fixed_cache.clear()
+					fixed_cache[url] = (time.time(), candidate, media)
 					return candidate, media
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
-			if only is not None:
+			if text_ok:
 				# the site's own embed still works (a card at least), so the link stays as it is
-				steps.append("✓ kept the original link: its own embed works without a fixer")
+				steps.append("✓ kept the original link: no fixer could show it, and its own embed works")
 				return None, utils.KEEP_ORIGINAL
 			return None, None
 
@@ -496,12 +482,12 @@ def run_discord_bot():
 			host = utils.host_of(current)
 			for other in hosts[hosts.index(host) + 1:] if host in hosts else []:
 				candidate = utils.fix_url(url, rule, other)
-				problem = await embed_problem(candidate, {}, rule.get("domain"))
+				problem = await embed_problem(candidate, {}, rule.get("domain"), utils.own_embed_works(rule))
 				if problem is None:
 					steps.append(f"↻ switched to `{other}`")
 					return candidate
 				steps.append(f"✗ `{other}`: {problem}")
-			if utils.fixer_only_for(rule) is not None:
+			if utils.own_embed_works(rule):
 				steps.append("↻ switched back to the original link (its own embed)")
 				return url
 			return None
@@ -566,7 +552,7 @@ def run_discord_bot():
 			song_buttons = {u: b for u, b in zip(music, songs) if b}
 			chosen = {u: fixed for u, (fixed, _media) in zip(unique, results) if fixed}
 			media = {u: kind for u, (_fixed, kind) in zip(unique, results)}
-			# links whose own embed is the better one (Reddit text, link and photo posts) stay as they are
+			# Reddit links no fixer could show stay as they are (Discord's own card)
 			kept = {u for u, kind in media.items() if kind == utils.KEEP_ORIGINAL}
 
 			# One multi-photo Instagram post per message becomes a real gallery (attachments cap at 10).

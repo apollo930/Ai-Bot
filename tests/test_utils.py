@@ -181,17 +181,13 @@ def test_x_media_plan_picks_videos_that_fit():
     assert utils.x_media_plan({}, 10, 10) == []
 
 
-def test_reddit_post_kinds_and_only_rule():
-    gallery = '<meta property="og:image" content="https://i.redd.it/a.jpeg"><meta property="og:image" content="https://i.redd.it/b.jpeg">'
-    assert utils.page_images(gallery) == 2
-    assert utils.page_images('<meta property="og:image" content="">') == 0
-    assert utils.post_kind("video", 1) == "video"
-    assert utils.post_kind("image", 4) == "gallery"
-    assert utils.post_kind("image", 1) == "image"
-    assert utils.post_kind(None, 0) is None
-    assert utils.fixer_only_for({"domain": "reddit.com", "replacement": "vxreddit.com"}) == {"video", "gallery"}
-    assert utils.fixer_only_for({"domain": "www.reddit.com", "replacement": "vxreddit.com"}) == {"video", "gallery"}
-    assert utils.fixer_only_for({"domain": "instagram.com", "replacement": "ig.example"}) is None
+def test_reddit_keeps_its_own_embed_and_text_pages_count():
+    assert utils.own_embed_works({"domain": "reddit.com", "replacement": "vxreddit.com"})
+    assert utils.own_embed_works({"domain": "www.reddit.com", "replacement": "vxreddit.com"})
+    assert not utils.own_embed_works({"domain": "instagram.com", "replacement": "ig.example"})
+    assert utils.has_text_embed('<meta property="og:description" content="What is the coldest line?">')
+    assert utils.has_text_embed('<meta property="og:site_name" content="u/x on r/AskReddit">')
+    assert not utils.has_text_embed('<meta property="og:title" content="vxReddit">')
 
 
 def test_preview_ok():
