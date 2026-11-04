@@ -191,7 +191,7 @@ def has_text_embed(html: str) -> bool:
 # Sites whose own Discord embed works without a fixer: Reddit draws a card for every post. Their
 # links still go through the fixer (vxreddit: playable videos, galleries, votes), where a page
 # that shows the post in text counts as working; but when no fixer can show a post, the original
-# link stays as it is (no ⚠️, no download attempt) and Discord shows its own card.
+# link stays as it is (⚠️ like any unfixed link, but no download attempt) and Discord shows its own card.
 OWN_EMBED_SITES = {"reddit.com"}
 KEEP_ORIGINAL = "original"
 

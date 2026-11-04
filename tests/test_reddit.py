@@ -140,10 +140,10 @@ def fix(bot, text):
     return msg, channel
 
 
-def test_vxreddit_down_leaves_the_message_alone_without_a_failure_mark(bot, monkeypatch):
+def test_vxreddit_down_leaves_the_message_alone_with_the_usual_warning(bot, monkeypatch):
     FakeSession.pages = {"vxreddit.com": (502, "")}
     msg, channel = fix(bot, "look https://www.reddit.com/r/AskReddit/comments/aaa/q/")
-    assert not msg.deleted and channel.hook.sent == [] and msg.reactions == []
+    assert not msg.deleted and channel.hook.sent == [] and msg.reactions == ["⚠️"]
 
 
 def test_text_post_is_reposted_with_vxreddit(bot, monkeypatch):

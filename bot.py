@@ -586,8 +586,8 @@ def run_discord_bot():
 						chosen[url] = f"<{chosen.get(url, url)}>"
 						break
 			if not chosen and not song_buttons:
-				# nothing to change: every link keeps its own embed (no ❌), or no fixer works right now
-				return len(kept) == len(unique), None
+				# no fixer works right now: leave the original alone (it gets ⚠️, Reddit included)
+				return False, None
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			# 🔁 for posts someone already shared here, linking to that first repost
 			keys = {utils.link_key(u) for u in [*chosen, *song_buttons]}
