@@ -232,8 +232,11 @@ def test_revert_links():
     text = ("lol https://ig.reaper113.xyz/reel/AbC/?r=1 and <https://kkinstagram.com/p/Xy/?img_index=2> "
             "||https://x.reaper113.xyz/u/status/2/en|| https://fixupx.com/u/status/3, "
             "https://vxreddit.com/r/pics/s/k3y https://example.com/a\n-# 🔁 [posted before](<https://discord.com/channels/1/2/3>)")
-    assert utils.revert_links(text, rules) == (
+    reverted, pairs = utils.revert_links(text, rules)
+    assert reverted == (
         "lol https://instagram.com/reel/AbC/ and <https://instagram.com/p/Xy/?img_index=2> "
         "||https://x.com/u/status/2|| https://x.com/u/status/3, "
         "https://reddit.com/r/pics/s/k3y https://example.com/a\n-# 🔁 [posted before](<https://discord.com/channels/1/2/3>)")
-    assert utils.revert_links("nothing here", rules) == "nothing here"
+    assert len(pairs) == 5 and pairs[0] == ("https://ig.reaper113.xyz/reel/AbC/?r=1", "https://instagram.com/reel/AbC/")
+    assert utils.redo_links(reverted, pairs) == text  # ↪️ puts every fixed link back
+    assert utils.revert_links("nothing here", rules) == ("nothing here", [])

@@ -730,6 +730,7 @@ def run_discord_bot():
 			await reaction_tracker.delete_messages([payload.message_id])
 			seen_links.forget(payload.message_id)  # a deleted repost no longer counts as posted before
 			repost_owners.forget(payload.message_id)
+			reverted_links.forget(payload.message_id)
 
 		@client.event
 		async def on_raw_bulk_message_delete(payload):
@@ -770,33 +771,47 @@ def run_discord_bot():
 			if not interaction.data or "custom_id" not in interaction.data:
 				return
 			cid = interaction.data["custom_id"]
-			if not cid.startswith(("dellink:", "revert:")):
+			if not cid.startswith(("dellink:", "revert:", "redo:")):
 				return
 			author_id = int(cid.split(":", 1)[1])
 			if interaction.user.id != author_id and not interaction.user.guild_permissions.manage_messages:
 				await interaction.response.send_message("Only the poster or a mod can do that.", ephemeral=True)
 				return
-			if cid.startswith("revert:"):
-				await revert_repost(interaction)
+			if cid.startswith(("revert:", "redo:")):
+				await revert_repost(interaction, redo=cid.startswith("redo:"))
 				return
 			await interaction.response.defer()
 			await interaction.message.delete()
 
-		async def revert_repost(interaction):
+		async def revert_repost(interaction, redo=False):
 			"""↩️ on a repost: put the original links back (instagram.com, x.com, reddit.com...), so
-			Discord shows its own embed, and drop the ↩️ button."""
+			Discord shows its own embed; the button turns into ↪️, which puts the fixed links back."""
 			message = interaction.message
-			content = utils.revert_links(message.content, url_rules)
+			if redo:
+				pairs = reverted_links.pop(message.id) or []
+				content = utils.redo_links(message.content, pairs)
+				nothing = "There's nothing to redo here."
+			else:
+				content, pairs = utils.revert_links(message.content, url_rules)
+				nothing = "There's no fixed link left to revert."
 			if content == message.content:
-				await interaction.response.send_message("There's no fixed link left to revert.", ephemeral=True)
+				await interaction.response.send_message(nothing, ephemeral=True)
 				return
+			owner = interaction.data["custom_id"].split(":", 1)[1]
 			view = discord.ui.View.from_message(message, timeout=None)
-			for item in list(view.children):
-				if (getattr(item, "custom_id", None) or "").startswith("revert:"):
-					view.remove_item(item)
+			items = list(view.children)
+			view.clear_items()
+			for item in items:  # same buttons in the same order, with ↩️ and ↪️ swapped
+				if (getattr(item, "custom_id", None) or "").startswith(("revert:", "redo:")):
+					item = discord.ui.Button(emoji="↩️" if redo else "↪️", style=discord.ButtonStyle.secondary,
+						custom_id=f"{'revert' if redo else 'redo'}:{owner}")
+				view.add_item(item)
 			await interaction.response.edit_message(content=content, view=view)
+			if not redo:
+				reverted_links.save(message.id, pairs)
+			what = "↪️ fixed links put back" if redo else "↩️ reverted to the original link"
 			for url_steps in (fix_details.get(message.id) or {}).values():
-				url_steps.append(f"↩️ reverted to the original link by {interaction.user.display_name}")
+				url_steps.append(f"{what} by {interaction.user.display_name}")
 
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")
@@ -813,6 +828,7 @@ def run_discord_bot():
 		watch_tasks = set()  # running watch_embeds checks (kept here so they aren't garbage-collected)
 		seen_links = utils.SeenLinks("links.db")
 		repost_owners = utils.RepostOwners("links.db")
+		reverted_links = utils.RevertedLinks("links.db")  # what ↩️ took out, for ↪️
 		app_emojis = {}  # name -> the bot's application emoji (button logos from emojis/)
 		http = None
 		reactions = {}

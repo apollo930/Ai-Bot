@@ -103,14 +103,30 @@ def fixer_links(text: str, rules: list[dict]) -> list[tuple[str, dict, str]]:
     return found
 
 
-def revert_links(text: str, rules: list[dict]) -> str:
-    """text with every fixer link (suppressed and spoilered ones too) back on its original site."""
+def revert_links(text: str, rules: list[dict]) -> tuple[str, list[tuple[str, str]]]:
+    """text with every fixer link (suppressed and spoilered ones too) back on its original site,
+    and the (fixer URL, original) pairs changed, so redo_links can put them back."""
+    pairs = []
+
     def back(m):
         url = m.group().rstrip(".,;:!?'*")
         rule = fixer_rule(url, rules)
-        return (original_link(url, rule) + m.group()[len(url):]) if rule else m.group()
+        if not rule:
+            return m.group()
+        original = original_link(url, rule)
+        pairs.append((url, original))
+        return original + m.group()[len(url):]
 
-    return URL_RE.sub(back, text)
+    return URL_RE.sub(back, text), pairs
+
+
+def redo_links(text: str, pairs) -> str:
+    """Undo revert_links: each original link (in order) back to its fixer URL."""
+    for fixed, original in pairs:
+        at = text.find(original)
+        if at != -1:
+            text = text[:at] + fixed + text[at + len(original):]
+    return text
 
 
 def spoiler_spans(text: str) -> list[tuple[int, int]]:
@@ -517,6 +533,28 @@ class RepostOwners:
 
     def forget(self, message_id: int):
         self.db.execute("DELETE FROM reposts WHERE message_id = ?", (message_id,))
+        self.db.commit()
+
+
+class RevertedLinks:
+    """Fixer links a repost's ↩️ took out, so its ↪️ can put them back (survives restarts)."""
+
+    def __init__(self, path: str):
+        self.db = sqlite3.connect(path)
+        self.db.execute("CREATE TABLE IF NOT EXISTS reverted_links (message_id INTEGER PRIMARY KEY, pairs TEXT NOT NULL)")
+        self.db.commit()
+
+    def save(self, message_id: int, pairs):
+        self.db.execute("INSERT OR REPLACE INTO reverted_links VALUES (?, ?)", (message_id, json.dumps(pairs)))
+        self.db.commit()
+
+    def pop(self, message_id: int):
+        row = self.db.execute("SELECT pairs FROM reverted_links WHERE message_id = ?", (message_id,)).fetchone()
+        self.forget(message_id)
+        return [tuple(p) for p in json.loads(row[0])] if row else None
+
+    def forget(self, message_id: int):
+        self.db.execute("DELETE FROM reverted_links WHERE message_id = ?", (message_id,))
         self.db.commit()
 
 
