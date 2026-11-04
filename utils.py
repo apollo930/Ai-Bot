@@ -71,23 +71,46 @@ def find_links(text: str, rules: list[dict]) -> list[tuple[int, int, str, dict]]
     return found
 
 
+def fixer_rule(url: str, rules: list[dict]) -> dict | None:
+    """The rule whose fixer hosts include url's host (a link in one of our reposts), or None."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    return next((r for r in rules if any(matches_domain(host, h) for h in rule_hosts(r))), None)
+
+
+# FxEmbed's translated form of a post (.../status/<id>/en), added by translated_x_url
+FX_TRANSLATED_RE = re.compile(r"(/status/\d+)/[a-z]{2}(?:-[a-z]{2,4})?/?$", re.IGNORECASE)
+
+
+def original_link(url: str, rule: dict) -> str:
+    """A fixer URL moved back onto the rule's own site: without our retry marker (r=) and
+    without FxEmbed's translation suffix (/en)."""
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(parsed.query) if k != "r"])
+    path = FX_TRANSLATED_RE.sub(r"\1", parsed.path)
+    return urllib.parse.urlunparse(parsed._replace(scheme="https", netloc=rule["domain"], path=path, query=query))
+
+
 def fixer_links(text: str, rules: list[dict]) -> list[tuple[str, dict, str]]:
     """Fixer links shown openly in one of our reposts, as (fixer URL, rule, original link).
-    Leaves out <suppressed> and spoilered links (Discord previews neither). The original is
-    the fixer URL moved back onto the rule's own site, without our retry marker (r=)."""
+    Leaves out <suppressed> and spoilered links (Discord previews neither)."""
     found = []
     for start, _end, url, _rule in find_links(text, [{"domain": h} for r in rules for h in rule_hosts(r)]):
         if in_spoiler(text, start):
             continue
-        host = urllib.parse.urlparse(url).hostname or ""
-        rule = next((r for r in rules if any(matches_domain(host, h) for h in rule_hosts(r))), None)
-        if rule is None:
-            continue
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(parsed.query) if k != "r"])
-        original = urllib.parse.urlunparse(parsed._replace(netloc=rule["domain"], query=query))
-        found.append((url, rule, original))
+        rule = fixer_rule(url, rules)
+        if rule is not None:
+            found.append((url, rule, original_link(url, rule)))
     return found
+
+
+def revert_links(text: str, rules: list[dict]) -> str:
+    """text with every fixer link (suppressed and spoilered ones too) back on its original site."""
+    def back(m):
+        url = m.group().rstrip(".,;:!?'*")
+        rule = fixer_rule(url, rules)
+        return (original_link(url, rule) + m.group()[len(url):]) if rule else m.group()
+
+    return URL_RE.sub(back, text)
 
 
 def spoiler_spans(text: str) -> list[tuple[int, int]]:

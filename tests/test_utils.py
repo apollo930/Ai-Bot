@@ -218,5 +218,22 @@ def test_fixer_links():
             "||https://x.reaper113.xyz/u/status/2|| https://x.reaper113.xyz/u/status/3/en https://example.com/a")
     assert utils.fixer_links(text, rules) == [
         ("https://ig.reaper113.xyz/reel/AbC/?r=1", rules[0], "https://instagram.com/reel/AbC/"),
-        ("https://x.reaper113.xyz/u/status/3/en", rules[1], "https://x.com/u/status/3/en"),
+        ("https://x.reaper113.xyz/u/status/3/en", rules[1], "https://x.com/u/status/3"),
     ]
+
+
+
+def test_revert_links():
+    rules = [
+        {"domain": "instagram.com", "replacement": ["ig.reaper113.xyz", "kkinstagram.com"]},
+        {"domain": "x.com", "replacement": ["fixupx.com", "x.reaper113.xyz"]},
+        {"domain": "reddit.com", "replacement": "vxreddit.com"},
+    ]
+    text = ("lol https://ig.reaper113.xyz/reel/AbC/?r=1 and <https://kkinstagram.com/p/Xy/?img_index=2> "
+            "||https://x.reaper113.xyz/u/status/2/en|| https://fixupx.com/u/status/3, "
+            "https://vxreddit.com/r/pics/s/k3y https://example.com/a\n-# 🔁 [posted before](<https://discord.com/channels/1/2/3>)")
+    assert utils.revert_links(text, rules) == (
+        "lol https://instagram.com/reel/AbC/ and <https://instagram.com/p/Xy/?img_index=2> "
+        "||https://x.com/u/status/2|| https://x.com/u/status/3, "
+        "https://reddit.com/r/pics/s/k3y https://example.com/a\n-# 🔁 [posted before](<https://discord.com/channels/1/2/3>)")
+    assert utils.revert_links("nothing here", rules) == "nothing here"

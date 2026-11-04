@@ -621,6 +621,10 @@ def run_discord_bot():
 						download = None if url == gallery_url else utils.download_link(url, media.get(url), FXEMBED_HOST, INSTAFIX_API, chosen.get(url))
 						if download:
 							view.add_item(discord.ui.Button(emoji=button_emoji("download"), url=download))
+					# ↩️ puts the original links back (Discord's own embed) when the fixed one isn't wanted
+					if any(not chosen[u].startswith("<") for u in chosen):
+						view.add_item(discord.ui.Button(emoji="↩️", style=discord.ButtonStyle.secondary,
+							custom_id=f"revert:{message.author.id}"))
 					for buttons in song_buttons.values():
 						for platform, link in buttons:
 							view.add_item(discord.ui.Button(emoji=button_emoji(platform), url=link))
@@ -766,14 +770,33 @@ def run_discord_bot():
 			if not interaction.data or "custom_id" not in interaction.data:
 				return
 			cid = interaction.data["custom_id"]
-			if not cid.startswith("dellink:"):
+			if not cid.startswith(("dellink:", "revert:")):
 				return
 			author_id = int(cid.split(":", 1)[1])
 			if interaction.user.id != author_id and not interaction.user.guild_permissions.manage_messages:
 				await interaction.response.send_message("Only the poster or a mod can do that.", ephemeral=True)
 				return
+			if cid.startswith("revert:"):
+				await revert_repost(interaction)
+				return
 			await interaction.response.defer()
 			await interaction.message.delete()
+
+		async def revert_repost(interaction):
+			"""↩️ on a repost: put the original links back (instagram.com, x.com, reddit.com...), so
+			Discord shows its own embed, and drop the ↩️ button."""
+			message = interaction.message
+			content = utils.revert_links(message.content, url_rules)
+			if content == message.content:
+				await interaction.response.send_message("There's no fixed link left to revert.", ephemeral=True)
+				return
+			view = discord.ui.View.from_message(message, timeout=None)
+			for item in list(view.children):
+				if (getattr(item, "custom_id", None) or "").startswith("revert:"):
+					view.remove_item(item)
+			await interaction.response.edit_message(content=content, view=view)
+			for url_steps in (fix_details.get(message.id) or {}).values():
+				url_steps.append(f"↩️ reverted to the original link by {interaction.user.display_name}")
 
 		load_dotenv()
 		GUILD_ID = os.environ.get("GUILD_ID")

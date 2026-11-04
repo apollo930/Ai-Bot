@@ -151,6 +151,8 @@ def test_text_post_is_reposted_with_vxreddit(bot, monkeypatch):
     FakeSession.pages = {"vxreddit.com": (200, TEXT)}
     msg, channel = fix(bot, "look https://www.reddit.com/r/AskReddit/comments/aaa/q/")
     assert msg.deleted and channel.hook.sent[-1][0] == "look https://vxreddit.com/r/AskReddit/comments/aaa/q/"
+    ids = [getattr(item, "custom_id", None) or "" for item in channel.hook.sent[-1][1]["view"].children]
+    assert any(i.startswith("revert:") for i in ids) and any(i.startswith("dellink:") for i in ids)
 
 
 def test_video_post_is_reposted_with_vxreddit(bot, monkeypatch):
