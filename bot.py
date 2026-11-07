@@ -45,7 +45,7 @@ def run_discord_bot():
 
 		intents = discord.Intents.default()
 		intents.message_content = True
-		intents.presences = True
+		intents.presences = False
 		intents.members = True
 		client = discord.Client(intents=intents)
 		tree = discord.app_commands.CommandTree(client)
@@ -58,7 +58,7 @@ def run_discord_bot():
 
 		@client.event
 		async def on_ready():
-			nonlocal game_log_channel, url_rules, reactions
+			nonlocal url_rules, reactions
 			cpu_temp = utils.get_cpu_temp()
 			await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"your feelings @{cpu_temp}"))
 			if not update_presence.is_running():
@@ -75,22 +75,12 @@ def run_discord_bot():
 			try:
 				with open("config.json") as f:
 					data = json.load(f)
-					ch_id = data.get("game_log_channel_id")
-					if ch_id:
-						ch = client.get_channel(ch_id)
-						if ch and ch.permissions_for(ch.guild.me).send_messages:
-							game_log_channel = ch
-							print(f"Game log channel set to #{ch.name}", flush=True)
-						else:
-							print(f"Warning: config.json channel {ch_id} not found or not messageable", flush=True)
-					else:
-						print("No game_log_channel_id in config.json", flush=True)
 					url_rules.clear()
 					url_rules.extend(data.get("url_rules", []))
 					reactions.clear()
 					reactions.update(data.get("reactions", {}))
 			except FileNotFoundError:
-				print("No config.json found — use /setgamechannel to configure game tracking", flush=True)
+				print("No config.json found", flush=True)
 			try:
 				if GUILD_ID:
 					g = discord.Object(id=int(GUILD_ID))
@@ -821,7 +811,6 @@ def run_discord_bot():
 		FXEMBED_HOST = "x.reaper113.xyz"
 		FXEMBED_API = "https://xapi.reaper113.xyz"  # its JSON API: a post's photos and videos, for spoilered X links
 		APPLE_COUNTRY = "IN"  # Apple Music store the "Apple Music" button links into
-		game_log_channel = None
 		url_rules = []
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
@@ -833,38 +822,6 @@ def run_discord_bot():
 		http = None
 		reactions = {}
 		dead_reactions = {}  # name -> what the last check got from its link (shown in /listai)
-
-		@client.event
-		async def on_presence_update(before, after):
-			nonlocal game_log_channel
-			if not game_log_channel:
-				return
-			if before.activities == after.activities:
-				return
-			before_games = {a.name for a in before.activities if isinstance(a, discord.Game)}
-			after_games = {a.name for a in after.activities if isinstance(a, discord.Game)}
-			new_games = after_games - before_games
-			for game in new_games:
-				await game_log_channel.send(f"Yooo {after.mention} started playing **{game}**!")
-
-		@tree.command(name="setgamechannel", description="Set channel for game activity logs")
-		@discord.app_commands.default_permissions(manage_guild=True)
-		async def set_game_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-			nonlocal game_log_channel
-			if not channel.permissions_for(interaction.guild.me).send_messages:
-				await interaction.response.send_message("I can't send messages there!", ephemeral=True)
-				return
-			data = {}
-			try:
-				with open("config.json") as f:
-					data = json.load(f)  # keep url_rules, reactions and anything else saved there
-			except (FileNotFoundError, json.JSONDecodeError):
-				pass
-			data["game_log_channel_id"] = channel.id
-			with open("config.json", "w") as f:
-				json.dump(data, f)
-			game_log_channel = channel
-			await interaction.response.send_message(f"Game logs will go to {channel.mention}", ephemeral=True)
 
 		@tree.context_menu(name="Embed details")
 		async def embed_details(interaction: discord.Interaction, message: discord.Message):

@@ -20,7 +20,6 @@ Discord objects, without connecting or touching the network.
 
 | Command | Description |
 |---|---|
-| `/setgamechannel` | Set channel for game activity announcements |
 | `/urlrule add <domain> <replacement> [drop]` | Rewrite links to an embed fixer. `replacement` can list several hosts, comma-separated (`ig.reaper113.xyz,kkinstagram.com`): each is checked in order and the first one that gives Discord an image/video wins. If none does, the message is left alone. |
 | `/urlrule remove` / `/urlrule list` | Manage the rules |
 | `/fixlinks [count]` | Recheck the latest `count` reposts in this channel (default 1, up to 50) and fix any link Discord didn't preview: the same steps as the automatic check below. Replies only to you. |
