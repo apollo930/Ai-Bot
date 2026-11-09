@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from typing import Literal
 from reaction_stats import ReactionTracker, parse_scan_limit
 from reaction_report import ReactionReport, add_scan_status
+from hall_of_fame import HallOfFame
 
 ReactionChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
@@ -721,6 +722,7 @@ def run_discord_bot():
 			seen_links.forget(payload.message_id)  # a deleted repost no longer counts as posted before
 			repost_owners.forget(payload.message_id)
 			reverted_links.forget(payload.message_id)
+			hall_of_fame.forget(payload.message_id)
 
 		@client.event
 		async def on_raw_bulk_message_delete(payload):
@@ -859,6 +861,31 @@ def run_discord_bot():
 
 		reaction_tracker = ReactionTracker(client, repost_owner)
 		reaction_tracker.repost_owner_id = repost_owners.owner  # live reactions on reposts need no message fetch
+		hall_of_fame = HallOfFame(client, reaction_tracker.store)
+		reaction_tracker.on_change = hall_of_fame.on_change
+
+		halloffame = discord.app_commands.Group(name="halloffame", description="Repost messages lots of people react to",
+			guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
+
+		@halloffame.command(name="set", description="Turn it on: where to post, and how many people must react")
+		@discord.app_commands.describe(channel="Where famous messages go",
+			threshold="How many different people must react (not counting the author or bots); default 5")
+		async def halloffame_set(interaction: discord.Interaction, channel: discord.TextChannel,
+				threshold: discord.app_commands.Range[int, 2, 50] = 5):
+			if not channel.permissions_for(interaction.guild.me).send_messages:
+				await interaction.response.send_message(f"I can't post in {channel.mention}.", ephemeral=True)
+				return
+			hall_of_fame.configure(interaction.guild_id, channel.id, threshold)
+			await interaction.response.send_message(
+				f"🏆 Hall of fame is on: messages from the last week that {threshold} different people react to "
+				f"get posted in {channel.mention}. Private channels are never posted.", ephemeral=True)
+
+		@halloffame.command(name="off", description="Turn the hall of fame off")
+		async def halloffame_off(interaction: discord.Interaction):
+			hall_of_fame.disable(interaction.guild_id)
+			await interaction.response.send_message("Hall of fame is off. Earlier posts stay.", ephemeral=True)
+
+		tree.add_command(halloffame)
 
 		async def readable_for(interaction, channel):
 			"""(channel ids the asker can read, or None for a single selected channel; how to send the

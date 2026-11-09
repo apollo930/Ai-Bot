@@ -82,6 +82,15 @@ class ReactionStore:
                 self.db.execute(f"ALTER TABLE reaction_scans ADD COLUMN {name} {definition}")
         self.db.commit()
 
+    def reactors(self, message_id):
+        """How many different people reacted to a message (bots and its author never count)."""
+        return self.db.execute("SELECT COUNT(DISTINCT user_id) FROM reaction_entries WHERE message_id = ?", (message_id,)).fetchone()[0]
+
+    def message_breakdown(self, message_id):
+        """[(emoji, count)] on one message, most used first."""
+        return self.db.execute("SELECT MAX(emoji_display), COUNT(*) FROM reaction_entries WHERE message_id = ? "
+                               "GROUP BY emoji_key ORDER BY COUNT(*) DESC, emoji_key", (message_id,)).fetchall()
+
     def owner(self, message_id):
         row = self.db.execute("SELECT author_id FROM reaction_messages WHERE message_id = ?", (message_id,)).fetchone()
         return row[0] if row else None
@@ -227,6 +236,9 @@ class ReactionTracker:
         self.client, self.repost_owner = client, repost_owner
         # repost owner by message id alone (the bot sets it), so live reactions on reposts need no fetch
         self.repost_owner_id = None
+        # called with (guild id, channel id, message id) after a live event changed a message's counts
+        # (the hall of fame); never for history scans or catch-ups
+        self.on_change = None
         self.store = ReactionStore(path)
         # Fetch and commit under the same lock: live events cannot be overwritten by an older scan.
         self.lock = asyncio.Lock()
@@ -284,10 +296,14 @@ class ReactionTracker:
         if self._scan_changed is not None:
             self._scan_changed.add(payload.message_id)
         try:
-            if await self._apply_event(payload):
-                return
-            channel = self.client.get_channel(payload.channel_id) or await self.client.fetch_channel(payload.channel_id)
-            await self.sync_message(channel, payload.message_id)
+            if not await self._apply_event(payload):
+                channel = self.client.get_channel(payload.channel_id) or await self.client.fetch_channel(payload.channel_id)
+                await self.sync_message(channel, payload.message_id)
+            if self.on_change is not None:
+                try:
+                    await self.on_change(payload.guild_id, payload.channel_id, payload.message_id)
+                except Exception:  # noqa: BLE001 - the hall must never break counting
+                    log.warning("Hall of fame update failed for message %s", payload.message_id, exc_info=True)
         except discord.NotFound:
             await self.delete_channel(payload.channel_id)
         except discord.HTTPException:

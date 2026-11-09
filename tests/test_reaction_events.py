@@ -120,3 +120,16 @@ def test_events_during_a_scan_still_mark_the_message(tmp_path):
     t._scan_changed = set()
     run(t.on_reaction(add(100, by=20)))
     assert t._scan_changed == {100}
+
+
+def test_live_events_tell_the_hall_of_fame_and_its_errors_dont_break_counting(tmp_path):
+    t = tracker_with(tmp_path)
+    seen = []
+
+    async def on_change(guild_id, channel_id, message_id):
+        seen.append(message_id)
+        raise RuntimeError("hall broke")
+
+    t.on_change = on_change
+    run(t.on_reaction(add(100, by=20)))
+    assert seen == [100] and counts(t) == {"😂": 1}
