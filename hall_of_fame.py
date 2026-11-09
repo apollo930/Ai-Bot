@@ -21,25 +21,6 @@ def message_age(message_id):
     return time.time() - discord.utils.snowflake_time(message_id).timestamp()
 
 
-def is_public(channel):
-    """Everyone in the server can read it: the hall must not show private channels' messages."""
-    if getattr(channel, "type", None) == discord.ChannelType.private_thread:
-        return False
-    guild = getattr(channel, "guild", None)
-    if guild is None:
-        return False
-    try:
-        perms = channel.permissions_for(guild.default_role)
-    except (discord.ClientException, AttributeError):
-        return False
-    return perms.view_channel and perms.read_message_history
-
-
-def is_nsfw(channel):
-    parent = getattr(channel, "parent", None)
-    return bool(getattr(channel, "nsfw", False) or getattr(parent, "nsfw", False))
-
-
 class HallOfFame:
     def __init__(self, client, store, path="links.db"):
         self.client, self.store = client, store
@@ -94,8 +75,9 @@ class HallOfFame:
                 return
             channel = self.client.get_channel(channel_id) or await self.client.fetch_channel(channel_id)
             hall = self.client.get_channel(hall_channel_id)
-            if hall is None or not is_public(channel) or (is_nsfw(channel) and not is_nsfw(hall)):
+            if hall is None:
                 return
+            # every channel counts, private and NSFW ones too (the owner's choice)
             message = await channel.fetch_message(message_id)
             embed, view = self.card(message, channel, people)
             if hall_message_id is None:

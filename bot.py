@@ -878,7 +878,7 @@ def run_discord_bot():
 			hall_of_fame.configure(interaction.guild_id, channel.id, threshold)
 			await interaction.response.send_message(
 				f"🏆 Hall of fame is on: messages from the last week that {threshold} different people react to "
-				f"get posted in {channel.mention}. Private channels are never posted.", ephemeral=True)
+				f"get posted in {channel.mention}, from any channel.", ephemeral=True)
 
 		@halloffame.command(name="off", description="Turn the hall of fame off")
 		async def halloffame_off(interaction: discord.Interaction):

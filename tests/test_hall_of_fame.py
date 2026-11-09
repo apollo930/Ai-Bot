@@ -89,17 +89,17 @@ def test_posts_once_when_enough_people_react_then_updates(tmp_path):
     assert hall.edits[-1][1]["embed"].fields[0].name == "4 people reacted"
 
 
-def test_old_private_nsfw_and_hall_messages_stay_out(tmp_path):
-    store, hof, hall, source = setup(tmp_path)
+def test_private_and_nsfw_channels_count_old_and_hall_messages_dont(tmp_path):
+    for kwargs in ({"public": False}, {"nsfw": True}):
+        store, hof, hall, source = setup(_sub(tmp_path, kwargs), **kwargs)
+        mid = snowflake(60)
+        source.messages[mid] = message(mid)
+        react(store, hof, source, mid, 5)
+        assert len(hall.sent) == 1, kwargs
+    store, hof, hall, source = setup(_sub(tmp_path, {"base": 1}))
     old = snowflake(8 * 86400)
     source.messages[old] = message(old)
     react(store, hof, source, old, 5)  # older than a week
-    for kwargs in ({"public": False}, {"nsfw": True}):
-        store2, hof2, hall2, source2 = setup(_sub(tmp_path, kwargs), **kwargs)
-        mid = snowflake(60)
-        source2.messages[mid] = message(mid)
-        react(store2, hof2, source2, mid, 5)
-        assert hall2.sent == []
     mid = snowflake(60)
     store.replace(1, hall.id, mid, 10, [(20 + i, "unicode:😂", "😂") for i in range(5)])
     run(hof.on_change(1, hall.id, mid))  # reactions in the hall channel itself
