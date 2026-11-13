@@ -24,7 +24,7 @@ Discord objects, without connecting or touching the network.
 | `/urlrule remove` / `/urlrule list` | Manage the rules |
 | `/fixlinks [count]` | Recheck the latest `count` reposts in this channel (default 1, up to 50) and fix any link Discord didn't preview: the same steps as the automatic check below. Replies only to you. |
 | reply `fixlink` / right-click → Apps → Fix links | Fix just that message: a repost gets the same preview check, and a message the bot left alone (⚠️) is fixed again. The `fixlink` reply is removed and the result shows for 8 s. |
-| `/addai <name> [link] [file]` | Save a reaction (Manage Server). Upload the GIF/image/video itself and the bot keeps the file (up to the server's upload limit) in `data/reactions/`, so it never stops working; Discord file links, which expire after about a day, are kept as files the same way. The server's limit applies even if your Nitro account can upload larger files, because the bot reposts through a server webhook. If the server's limit later drops, oversized saved files are refused with an explanation. Other links are checked before saving. |
+| `/addai <name> [link] [file]` | Save a reaction (Manage Server). Upload the GIF/image/video itself and the bot keeps the file in `data/reactions/`. Files that fit the server's upload limit stay unchanged. Oversized still images are compressed automatically, lowering quality first and resizing if necessary; transparency is preserved. The confirmation shows the before/after size. Discord file links are downloaded and handled the same way, so they keep working after the link expires. Other links are checked before saving. |
 | `/ai <name> [target]` | Post a saved reaction as you (works in threads too). A link that has died is refused with a note to add it again. |
 | `;name` in a message | Same as `/ai name`: a message that's just `;name` (optionally `;name @someone`, or as a reply) is replaced by the reaction. |
 | `/listai` | List the saved reactions (only to you). 📎 = kept as a file; ⚠️ = its link died (links are checked daily). |
@@ -35,6 +35,8 @@ Discord objects, without connecting or touching the network.
 | `/reactionscan <limit> [channel] [all_channels]` | Administrators only: scan the last N messages, or `inf` for all history. Defaults to the current channel/thread. Set `all_channels:true` for the server; a numeric limit then applies separately to each channel/thread. |
 | `.hello` / `.hi` | Greeting |
 | `.inspire` / `.motivate` | Random quote |
+
+`/addai` can compress oversized still images up to 50 MiB and 32 megapixels. It uses the server's upload allowance because saved reactions are reposted through a server webhook; the original sender may have a higher personal Nitro allowance. GIFs and videos that fit stay unchanged; oversized animations and videos need to be resized separately. If the server's allowance later drops, oversized saved files are refused with an explanation. Copying and pasting an image can re-encode it as a larger PNG; using `/addai link:` with its Discord attachment URL keeps the original file when it already fits.
 
 ### Reaction totals
 

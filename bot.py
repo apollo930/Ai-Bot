@@ -5,6 +5,7 @@ from typing import Literal
 from reaction_stats import ReactionTracker, parse_scan_limit
 from reaction_report import ReactionReport, add_scan_status
 from hall_of_fame import HallOfFame
+from reaction_media import ImageCompressionError, SOURCE_MAX_BYTES, prepare_upload
 
 ReactionChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
@@ -1371,22 +1372,24 @@ def run_discord_bot():
 			# Saved files are reposted through a server webhook, so use the server's limit,
 			# even if the uploader's Nitro account can attach larger files.
 			limit = interaction.guild.filesize_limit if interaction.guild else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES
+			input_limit = max(limit, SOURCE_MAX_BYTES)
+			upload = None
 			if file:
-				if file.size > limit:
-					await interaction.followup.send(f"That file is over this server's upload limit ({limit / 2**20:g} MiB).", ephemeral=True)
+				if file.size > input_limit:
+					await interaction.followup.send(f"That original is over {input_limit / 2**20:g} MiB. Resize it before adding it.", ephemeral=True)
 					return
-				store_reaction_file(name, await file.read(), utils.reaction_extension(file.filename))
+				upload = (await file.read(), utils.reaction_extension(file.filename))
 				kind = "uploaded file"
 			elif not link.startswith(("http://", "https://")):
 				await interaction.followup.send("Links must start with http:// or https://", ephemeral=True)
 				return
 			elif utils.is_discord_upload(link):
 				# Discord's file links expire after about a day, so keep the file itself
-				got = await download_upload(link, limit)
+				got = await download_upload(link, input_limit)
 				if not got:
-					await interaction.followup.send(f"That Discord file link couldn't be downloaded (it may have expired or be over this server's {limit / 2**20:g} MiB upload limit).", ephemeral=True)
+					await interaction.followup.send(f"That Discord file link couldn't be downloaded (it may have expired or be over {input_limit / 2**20:g} MiB).", ephemeral=True)
 					return
-				store_reaction_file(name, *got)
+				upload = got
 				kind = "file (Discord links expire, so the bot keeps a copy)"
 			else:
 				problem = await link_problem(link)
@@ -1397,6 +1400,18 @@ def run_discord_bot():
 				reactions[name] = link
 				dead_reactions.pop(name, None)
 				kind = "link"
+			if upload is not None:
+				data, ext = upload
+				original_size = len(data)
+				try:
+					# Image decoding and encoding must not block Discord events or heartbeats.
+					data, ext = await asyncio.to_thread(prepare_upload, data, ext, limit)
+				except ImageCompressionError as error:
+					await interaction.followup.send(f"That file is over this server's upload limit ({limit / 2**20:g} MiB). {error}", ephemeral=True)
+					return
+				store_reaction_file(name, data, ext)
+				if len(data) < original_size:
+					kind = f"compressed image: {original_size / 2**20:.2f} → {len(data) / 2**20:.2f} MiB"
 			save_reactions()
 			await interaction.followup.send(f"✅ Saved `{name}` ({kind}). Post it with `/ai {name}` or by typing `;{name}`.", ephemeral=True)
 

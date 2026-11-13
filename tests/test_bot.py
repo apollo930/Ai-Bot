@@ -133,18 +133,17 @@ def test_addai_refuses_bad_names_missing_input_and_big_files(bot):
     assert "20 MiB" in said(i)
 
 
-@pytest.mark.parametrize("limit", [10 * 2**20, 20 * 2**20, 50 * 2**20])
+@pytest.mark.parametrize("limit", [1024, 2048, 4096])
 def test_addai_uses_server_upload_limit(bot, limit):
     channel = Channel()
     channel.guild.filesize_limit = limit
-    upload = Upload("image.png", b"image data")
-    upload.size = limit  # Discord's attachment metadata; avoid allocating large test images
+    upload = Upload("image.png", b"x" * limit)
     i = interaction(channel)
     run(bot["add_react"].callback(i, "fits", None, upload))
     assert bot["reactions"]["fits"] == "file:fits.png"
     assert "Saved `fits`" in said(i)
 
-    upload.size = limit + 1
+    upload = Upload("image.png", b"x" * (limit + 1))
     i = interaction(channel)
     run(bot["add_react"].callback(i, "fits", None, upload))
     assert "over this server's upload limit" in said(i)

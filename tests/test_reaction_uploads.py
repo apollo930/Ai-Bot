@@ -1,11 +1,13 @@
 """Saved Discord attachments follow the destination server's upload allowance."""
 
 import asyncio
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
-from test_bot import Channel, interaction, said
+from test_bot import Channel, Upload, interaction, said
 
 
 URL = "https://cdn.discordapp.com/attachments/1/2/image.png"
@@ -49,11 +51,12 @@ def test_addai_discord_link_uses_server_limit_and_preserves_old_file_on_failure(
     assert bot["reactions"]["image"] == "file:image.png"
     assert "Saved `image`" in said(i)
 
-    response.content_length = 9
+    response.chunks = [b"invalid oversized image"]
+    response.content_length = len(response.chunks[0])
     i = interaction(channel)
     asyncio.run(bot["add_react"].callback(i, "image", URL))
     assert "upload limit" in said(i)
-    assert response.consumed == 2  # rejected from the header without downloading again
+    assert response.consumed == 3  # downloaded for compression, then refused without replacing the old file
     with open(bot["reaction_file"]("image"), "rb") as saved:
         assert saved.read() == b"12345678"
 
@@ -74,3 +77,52 @@ def test_discord_link_above_old_cap_is_allowed_by_larger_server(bot_closures, mo
     i = interaction(channel)
     asyncio.run(bot_closures["add_react"].callback(i, "image", URL))
     assert "Saved `image`" in said(i)
+
+
+def png_data(size):
+    output = BytesIO()
+    Image.new("RGB", size, "orange").save(output, format="PNG", compress_level=0)
+    return output.getvalue()
+
+
+def test_pasted_png_above_ten_mib_is_compressed_and_can_be_reposted(bot_closures):
+    channel = Channel()
+    channel.guild.filesize_limit = 10 * 2**20
+    data = png_data((2048, 2048))
+    assert len(data) > channel.guild.filesize_limit
+    i = interaction(channel)
+    asyncio.run(bot_closures["add_react"].callback(i, "pasted", None, Upload("image.png", data)))
+    assert "compressed image:" in said(i)
+    assert bot_closures["reactions"]["pasted"] == "file:pasted.jpg"
+    with Image.open(bot_closures["reaction_file"]("pasted")) as saved:
+        assert saved.size == (2048, 2048)
+    asyncio.run(bot_closures["react"].callback(i, "pasted"))
+    assert said(i) == "✅"
+    channel.hook.sent[-1][1]["file"].close()
+
+
+def test_discord_link_is_compressed_before_replacing_saved_reaction(bot_closures, monkeypatch):
+    channel = Channel()
+    channel.guild.filesize_limit = 4096
+    response = Download([png_data((128, 128))])
+    mock_download(monkeypatch, response)
+    i = interaction(channel)
+    asyncio.run(bot_closures["add_react"].callback(i, "image", URL))
+    assert "compressed image:" in said(i)
+    assert bot_closures["reactions"]["image"] == "file:image.jpg"
+
+
+def test_source_file_above_processing_cap_is_refused_before_reading(bot_closures):
+    import bot
+
+    upload = Upload("huge.png", b"not downloaded")
+    upload.size = bot.SOURCE_MAX_BYTES + 1
+
+    async def forbidden_read():
+        pytest.fail("Oversized sources must be rejected without downloading")
+
+    upload.read = forbidden_read
+    i = interaction()
+    asyncio.run(bot_closures["add_react"].callback(i, "huge", None, upload))
+    assert "original is over 50 MiB" in said(i)
+    assert "huge" not in bot_closures["reactions"]
