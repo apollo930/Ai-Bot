@@ -27,7 +27,6 @@ PLAIN_BUTTON_EMOJI = {
 }
 # Saved reactions (/addai): uploaded files live here (gitignored; the bots' failover syncs data/)
 REACTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "reactions")
-REACTION_MAX_BYTES = 10 * 2**20  # Discord's upload limit in a server without boosts
 REACTION_NAME_RE = re.compile(r"[\w-]{1,32}")
 REACTION_TRIGGER_RE = re.compile(r";([\w-]{1,32})(?:\s+(<@!?\d+>))?")  # ;name, optionally with one @mention
 FALLBACK_TIMEOUT = 60  # seconds yt-dlp gets to fetch a post's video when no fixer embeds it
@@ -1244,22 +1243,24 @@ def run_discord_bot():
 				print(f"Reaction link check failed for {url}: {e.__class__.__name__}", flush=True)
 				return None
 
-		async def download_upload(url: str) -> tuple[bytes, str] | None:
+		async def download_upload(url: str, max_bytes: int) -> tuple[bytes, str] | None:
 			"""(data, extension) of a Discord attachment link, or None if it expired or is too big."""
 			nonlocal http
 			if http is None or http.closed:
 				http = aiohttp.ClientSession(headers={"User-Agent": utils.PROBE_UA})
 			try:
 				async with http.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-					if resp.status != 200 or (resp.content_length or 0) > REACTION_MAX_BYTES:
+					if resp.status != 200 or (resp.content_length or 0) > max_bytes:
 						return None
-					data = await resp.read()
+					data = bytearray()
+					async for chunk in resp.content.iter_chunked(64 * 1024):
+						data.extend(chunk)
+						if len(data) > max_bytes:
+							return None
 			except Exception as e:
 				print(f"Reaction download failed for {url}: {e.__class__.__name__}", flush=True)
 				return None
-			if len(data) > REACTION_MAX_BYTES:
-				return None
-			return data, utils.reaction_extension(url)
+			return bytes(data), utils.reaction_extension(url)
 
 		def store_reaction_file(name: str, data: bytes, ext: str):
 			drop_reaction_file(name)
@@ -1286,6 +1287,8 @@ def run_discord_bot():
 			path = reaction_file(name)
 			if path and not os.path.exists(path):
 				return f"`{name}`'s file is missing. Add it again with /addai."
+			if path and os.path.getsize(path) > channel.guild.filesize_limit:
+				return f"`{name}`'s file is over this server's current upload limit ({channel.guild.filesize_limit / 2**20:g} MiB)."
 			if not path:
 				problem = await link_problem(value)
 				if problem:
@@ -1365,9 +1368,12 @@ def run_discord_bot():
 				await interaction.response.send_message("Give a link or upload a file.", ephemeral=True)
 				return
 			await interaction.response.defer(ephemeral=True)
+			# Saved files are reposted through a server webhook, so use the server's limit,
+			# even if the uploader's Nitro account can attach larger files.
+			limit = interaction.guild.filesize_limit if interaction.guild else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES
 			if file:
-				if file.size > REACTION_MAX_BYTES:
-					await interaction.followup.send(f"That file is over {REACTION_MAX_BYTES // 2**20} MB.", ephemeral=True)
+				if file.size > limit:
+					await interaction.followup.send(f"That file is over this server's upload limit ({limit / 2**20:g} MiB).", ephemeral=True)
 					return
 				store_reaction_file(name, await file.read(), utils.reaction_extension(file.filename))
 				kind = "uploaded file"
@@ -1376,9 +1382,9 @@ def run_discord_bot():
 				return
 			elif utils.is_discord_upload(link):
 				# Discord's file links expire after about a day, so keep the file itself
-				got = await download_upload(link)
+				got = await download_upload(link, limit)
 				if not got:
-					await interaction.followup.send("That Discord file link has expired (or is over 10 MB). Upload the file instead.", ephemeral=True)
+					await interaction.followup.send(f"That Discord file link couldn't be downloaded (it may have expired or be over this server's {limit / 2**20:g} MiB upload limit).", ephemeral=True)
 					return
 				store_reaction_file(name, *got)
 				kind = "file (Discord links expire, so the bot keeps a copy)"

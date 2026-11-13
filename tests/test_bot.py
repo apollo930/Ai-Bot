@@ -25,6 +25,7 @@ class Hook:
 class Channel:
     def __init__(self, has_hook=True):
         self.hook, self.has_hook, self.created = Hook(), has_hook, False
+        self.guild = types.SimpleNamespace(filesize_limit=20 * 2**20)
 
     async def webhooks(self):
         return [self.hook] if self.has_hook else []
@@ -37,6 +38,7 @@ class Channel:
 class FakeThread:
     def __init__(self, parent=None):
         self.parent = parent
+        self.guild = parent.guild if parent else types.SimpleNamespace(filesize_limit=20 * 2**20)
 
 
 class Response:
@@ -66,7 +68,8 @@ MEMBER = types.SimpleNamespace(id=42, display_name="VB", display_avatar=types.Si
 
 def interaction(channel=None, user=MEMBER):
     response = Response()
-    return types.SimpleNamespace(channel=channel, user=user, response=response, followup=Followup(response))
+    guild = channel.guild if channel else types.SimpleNamespace(filesize_limit=20 * 2**20)
+    return types.SimpleNamespace(channel=channel, guild=guild, user=user, response=response, followup=Followup(response))
 
 
 def said(i):
@@ -125,10 +128,38 @@ def test_addai_refuses_bad_names_missing_input_and_big_files(bot):
         i = interaction()
         run(bot["add_react"].callback(i, *args))
         assert bot["reactions"] == {}
-    import bot as bot_module
-
-    add_file_reaction(bot, "big", b"0" * (bot_module.REACTION_MAX_BYTES + 1))
+    i = add_file_reaction(bot, "big", b"0" * (20 * 2**20 + 1))
     assert "big" not in bot["reactions"]
+    assert "20 MiB" in said(i)
+
+
+@pytest.mark.parametrize("limit", [10 * 2**20, 20 * 2**20, 50 * 2**20])
+def test_addai_uses_server_upload_limit(bot, limit):
+    channel = Channel()
+    channel.guild.filesize_limit = limit
+    upload = Upload("image.png", b"image data")
+    upload.size = limit  # Discord's attachment metadata; avoid allocating large test images
+    i = interaction(channel)
+    run(bot["add_react"].callback(i, "fits", None, upload))
+    assert bot["reactions"]["fits"] == "file:fits.png"
+    assert "Saved `fits`" in said(i)
+
+    upload.size = limit + 1
+    i = interaction(channel)
+    run(bot["add_react"].callback(i, "fits", None, upload))
+    assert "over this server's upload limit" in said(i)
+    assert f"{limit / 2**20:g} MiB" in said(i)
+    assert bot["reactions"]["fits"] == "file:fits.png"
+
+
+def test_ai_refuses_file_after_server_limit_drops(bot):
+    add_file_reaction(bot, data=b"image data")
+    channel = Channel()
+    channel.guild.filesize_limit = 5
+    i = interaction(channel)
+    run(bot["react"].callback(i, "doakes"))
+    assert "over this server's current upload limit" in said(i)
+    assert not channel.hook.sent
 
 
 def test_ai_sends_the_file_in_a_thread_through_the_parent_webhook(bot):
