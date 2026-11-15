@@ -491,6 +491,36 @@ def recrawl_url(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(params)))
 
 
+def youtube_video_id(url: str) -> str | None:
+    """Video ID across YouTube's watch, short, Shorts, live and embed URLs."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+        if parsed.scheme not in ("http", "https"):
+            return None
+        parts = parsed.path.strip("/").split("/")
+        if host == "youtu.be" and len(parts) == 1:
+            video_id = parts[0]
+        elif host in ("youtube.com", "music.youtube.com", "youtube-nocookie.com"):
+            if parsed.path.rstrip("/") == "/watch" and host != "youtube-nocookie.com":
+                video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+            elif len(parts) == 2 and parts[0] in ("shorts", "live", "embed", "v"):
+                video_id = parts[1]
+            else:
+                return None
+        else:
+            return None
+    except ValueError:
+        return None
+    return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else None
+
+
+def find_youtube_links(text: str) -> list[str]:
+    """Video links using the same code/preview-suppression exclusions as link fixing."""
+    rules = [{"domain": host} for host in ("youtube.com", "youtu.be", "youtube-nocookie.com")]
+    return [url for _start, _end, url, _rule in find_links(text, rules) if youtube_video_id(url)]
+
+
 def link_key(url: str) -> str:
     """Same key for every link to one post (x.com and twitter.com, tracking params, www.)."""
     status = x_status(url)
@@ -499,6 +529,10 @@ def link_key(url: str) -> str:
     code = instagram_shortcode(url)
     if code:
         return f"ig:{code}"
+    video_id = youtube_video_id(url)
+    if video_id:
+        # Keep the existing YouTube Music prefix so its saved history also matches video links.
+        return f"ytmusic:{video_id}"
     song = music_track(url)
     if song:
         return f"{song[0]}:{song[1]}"

@@ -582,6 +582,7 @@ def run_discord_bot():
 			transformed = utils.rewrite_links(user_message, links, chosen)
 			# 🔁 for posts someone already shared here, linking to that first repost
 			keys = {utils.link_key(u) for u in [*chosen, *song_buttons]}
+			keys.update(utils.link_key(u) for u in utils.find_youtube_links(user_message))
 			for key, (jump_url, name, posted_at) in seen_links.earlier(message.guild.id, keys).items():
 				# [text](<url>): a bare message link makes Discord preview the whole earlier repost (embed and all)
 				transformed += f"\n-# 🔁 [posted before](<{jump_url}>) by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>"
@@ -666,6 +667,27 @@ def run_discord_bot():
 				task.add_done_callback(watch_tasks.discard)
 			return True, sent
 
+		async def note_youtube_reposts(message, text):
+			"""Track videos even when no link fixer is needed; leave the original post intact."""
+			keys = {utils.link_key(url) for url in utils.find_youtube_links(text)}
+			if not keys or message.flags.suppress_embeds:
+				return
+			earlier = seen_links.earlier(message.guild.id, sorted(keys))
+			# Record the original before sending any notice, including when replies aren't allowed.
+			seen_links.remember(message.guild.id, keys, message.id, message.jump_url, message.author.display_name)
+			notices, linked = [], set()
+			for jump_url, name, posted_at in earlier.values():
+				if jump_url == message.jump_url or jump_url in linked:
+					continue
+				linked.add(jump_url)
+				notices.append(f"-# 🔁 [posted before](<{jump_url}>) by {discord.utils.escape_markdown(name)} <t:{posted_at}:R>")
+			if notices:
+				try:
+					await message.reply(utils.fit_items(notices, 2000, sep="\n"), mention_author=False,
+						allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+				except discord.HTTPException as error:
+					print(f"YouTube repost notice failed in #{message.channel}: {error}", flush=True)
+
 		@client.event
 		async def on_message(message):
 			if message.author==client.user:
@@ -686,7 +708,9 @@ def run_discord_bot():
 			if not message.webhook_id and not message.author.bot and message.guild:
 				if await reaction_from_message(message):
 					return
-				await fix_links(message, user_message)
+				sent = await fix_links(message, user_message)
+				if sent is None:
+					await note_youtube_reposts(message, user_message)
 
 			if user_message[0] == '.':
 				rest = user_message[1:].strip()
