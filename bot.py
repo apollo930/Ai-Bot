@@ -151,6 +151,7 @@ def run_discord_bot():
 					if resp.content_type.startswith(("image/", "video/")):
 						if page is not None:
 							page["media"] = resp.content_type.split("/")[0]
+							page["rank"] = 3 if page["media"] == "video" else 2
 						return None
 					if "html" not in resp.content_type:
 						return f"answered with {resp.content_type}"
@@ -161,6 +162,7 @@ def run_discord_bot():
 					if page is not None:
 						page["lang"] = utils.page_lang(html)
 						page["media"] = utils.page_media(html)
+						page["rank"] = utils.page_rank(html)
 					if utils.has_embed_media(html) or (text_ok and utils.has_text_embed(html)):
 						return None
 					return "no image/video in its page (post not found or blocked)"
@@ -200,7 +202,9 @@ def run_discord_bot():
 					media = pages[candidate].get("media")
 					if len(fixed_cache) > 500:
 						fixed_cache.clear()
+						page_ranks.clear()
 					fixed_cache[url] = (time.time(), candidate, media)
+					page_ranks[candidate] = pages[candidate].get("rank", 0)
 					return candidate, media
 				steps.append(f"✗ `{host}`: {problem}")
 				print(f"Fixer {host} has no embed for {url}: {problem}", flush=True)
@@ -483,15 +487,71 @@ def run_discord_bot():
 				return url
 			return None
 
+		async def better_fixer(url: str, rule: dict, current: str, steps: list) -> str | None:
+			"""Another of the rule's fixers that shows more of this post than current does (the video
+			over an image, an image over a text card), or None. Asked after the repost is out, so
+			the first fixer that works never holds it up: Instagram sometimes gives ours only a
+			reel's cover frame while another fixer still gets the video."""
+			hosts = utils.rule_hosts(rule)
+			host = utils.host_of(current)
+			if host not in hosts or len(hosts) < 2:
+				return None
+			have = page_ranks.get(current)
+			if have is None:
+				page = {}
+				have = page.get("rank", 0) if await embed_problem(current, page, rule.get("domain")) is None else 0
+				page_ranks[current] = have
+			best, best_rank = None, have
+			for other in hosts:
+				if have >= 3 or best_rank >= 3:
+					break
+				if other == host:
+					continue
+				candidate, page = utils.fix_url(url, rule, other), {}
+				if await embed_problem(candidate, page, rule.get("domain")) is None and page.get("rank", 0) > best_rank:
+					best, best_rank = candidate, page["rank"]
+			if best:
+				page_ranks[best] = best_rank
+				steps.append(f"⬆️ `{utils.host_of(best)}` shows {utils.RANK_NAMES[best_rank]} where `{host}` showed {utils.RANK_NAMES[have]}: switched to it")
+			return best
+
+		async def apply_better(webhook, message_id: int, content: str, watched: dict, rules: dict, steps: dict, thread) -> str | None:
+			"""Switch the repost's links to better fixers where there are any (better_fixer).
+			Returns the repost's text afterwards, or None when it was deleted or edited meanwhile."""
+			found = await asyncio.gather(*(better_fixer(u, rules[u], f, steps[u]) for u, f in watched.items()))
+			new = content
+			for (url, fixed), better in zip(list(watched.items()), found):
+				if better:
+					new = new.replace(fixed, better)
+					watched[url] = better
+			if new == content:
+				return content
+			where = {"thread": thread} if thread else {}
+			try:
+				current = await webhook.fetch_message(message_id, **where)
+				if current.content != content:
+					return None  # edited with "Edit repost": leave it alone
+				await webhook.edit_message(message_id, content=new, **where)
+			except discord.HTTPException:
+				return None
+			return new
+
+		async def after_repost(webhook, sent, watched: dict, rules: dict, steps: dict, thread):
+			"""In the background after a repost: better fixers first, then the preview check."""
+			content = await apply_better(webhook, sent.id, sent.content, watched, rules, steps, thread)
+			if content is not None:
+				await watch_embeds(webhook, sent, watched, rules, steps, thread, content=content)
+
 		async def watch_embeds(webhook, sent, watched: dict, rules: dict, steps: dict, thread,
-				first_wait: float | None = None, own: set | None = None) -> str:
+				first_wait: float | None = None, own: set | None = None, content: str | None = None) -> str:
 			"""Make sure Discord previewed the repost's fixed links. watched maps each original
 			link to the fixer URL in the repost. For one without a preview (or with Instagram's
 			login page, what a fixer's redirect gives), the URL is edited so Discord fetches it
 			again; if that fails too, the next fixer is used.
 			Returns "fine" (previewed at the first look), "fixed", "failed" or "skipped" (deleted or
-			edited meanwhile). own: URLs of embeds the bot attached itself (a gallery's)."""
-			content = sent.content
+			edited meanwhile). own: URLs of embeds the bot attached itself (a gallery's). content: the
+			repost's text when it was just edited (apply_better), else sent.content."""
+			content = content if content is not None else sent.content
 			own = {e.url for e in sent.embeds} if own is None else own
 			where = {"thread": thread} if thread else {}
 			for attempt in range(EMBED_RETRIES + 1):
@@ -662,7 +722,7 @@ def run_discord_bot():
 			# links Discord should preview: fixed ones shown openly (not <suppressed>, spoilered or a gallery's)
 			watched = {u: f for u, f in chosen.items() if not f.startswith("<") and u not in spoilered and u != gallery_url}
 			if watched:
-				task = asyncio.create_task(watch_embeds(webhook, sent, watched, unique, steps, kwargs.get("thread")))
+				task = asyncio.create_task(after_repost(webhook, sent, watched, unique, steps, kwargs.get("thread")))
 				watch_tasks.add(task)
 				task.add_done_callback(watch_tasks.discard)
 			return True, sent
@@ -840,6 +900,7 @@ def run_discord_bot():
 		url_rules = []
 		fixed_cache = {}
 		fix_details = {}  # message id (original and repost) -> per-link attempt lines
+		page_ranks = {}  # fixer URL -> how much its page showed (utils.page_rank), for better_fixer
 		watch_tasks = set()  # running watch_embeds checks (kept here so they aren't garbage-collected)
 		seen_links = utils.SeenLinks("links.db")
 		repost_owners = utils.RepostOwners("links.db")
@@ -1081,7 +1142,12 @@ def run_discord_bot():
 				steps.setdefault(original, []).append(f"🔎 {how}: checked again")
 				watched[original], rules[original] = fixed, rule
 			own = {e.url for e in message.embeds if e.url and utils.host_of(e.url) in OWN_EMBED_HOSTS}
-			result = await watch_embeds(webhook, message, watched, rules, steps, thread, first_wait=0, own=own)
+			content = await apply_better(webhook, message.id, message.content, watched, rules, steps, thread)
+			if content is None:
+				return "skipped"
+			# after switching to a better fixer, give Discord the usual moment to fetch the new preview
+			wait = 0 if content == message.content else EMBED_CHECK_AFTER
+			result = await watch_embeds(webhook, message, watched, rules, steps, thread, first_wait=wait, own=own, content=content)
 			remember_details(steps, message.id)
 			return result
 

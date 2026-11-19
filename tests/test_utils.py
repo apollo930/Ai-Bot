@@ -240,3 +240,10 @@ def test_revert_links():
     assert len(pairs) == 5 and pairs[0] == ("https://ig.reaper113.xyz/reel/AbC/?r=1", "https://instagram.com/reel/AbC/")
     assert utils.redo_links(reverted, pairs) == text  # ↪️ puts every fixed link back
     assert utils.revert_links("nothing here", rules) == ("nothing here", [])
+
+
+def test_page_rank():
+    assert utils.page_rank('<meta property="og:video" content="https://a/v.mp4"><meta property="og:image" content="https://a/i.jpg">') == 3
+    assert utils.page_rank('<meta name="twitter:card" content="summary_large_image"><meta property="og:image" content="https://a/i.jpg">') == 2
+    assert utils.page_rank('<meta property="og:title" content="hi"><meta property="og:image" content="">') == 1
+    assert utils.page_rank('<link rel="alternate" type="application/activity+json" href="https://x/api">') == 3

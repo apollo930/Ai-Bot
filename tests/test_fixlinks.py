@@ -50,6 +50,10 @@ def bot(bot_closures, monkeypatch):
     import bot as bot_module
 
     monkeypatch.setattr(bot_module, "EMBED_CHECK_AFTER", 0)
+    from test_reddit import FakeSession
+
+    FakeSession.pages, FakeSession.requested = {}, []
+    monkeypatch.setattr(bot_module.aiohttp, "ClientSession", FakeSession)  # no real fixer requests
     bot_closures["url_rules"].append(IG_RULE)
     return bot_closures
 

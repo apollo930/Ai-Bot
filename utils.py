@@ -204,6 +204,28 @@ def page_lang(html: str) -> str | None:
     return m.group(1) if m else None
 
 
+VIDEO_KEYS = {"og:video", "og:video:url", "og:video:secure_url", "twitter:player", "twitter:player:stream"}
+IMAGE_KEYS = {"og:image", "og:image:url", "og:image:secure_url", "twitter:image"}
+RANK_NAMES = {0: "nothing", 1: "a text card", 2: "an image", 3: "the video"}
+
+
+def page_rank(html: str) -> int:
+    """How much a fixer page shows Discord: 3 a video, 2 an image, 1 only text.
+    FxEmbed's ActivityPub link counts as 3: Discord then shows the post's own photos and videos."""
+    if ACTIVITY_RE.search(html or ""):
+        return 3
+    keys = set()
+    for tag in META_RE.findall(html or ""):
+        attrs = {k.lower(): dq or sq for k, dq, sq in ATTR_RE.findall(tag)}
+        if (attrs.get("content") or "").strip():
+            keys.add((attrs.get("property") or attrs.get("name") or "").lower())
+    if keys & VIDEO_KEYS:
+        return 3
+    if keys & IMAGE_KEYS:
+        return 2
+    return 1
+
+
 CARD_RE = re.compile(r"""<meta\b[^>]*\b(?:name|property)\s*=\s*["']twitter:card["'][^>]*>""", re.IGNORECASE)
 
 
